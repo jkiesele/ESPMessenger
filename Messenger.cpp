@@ -1,35 +1,36 @@
 #include "Messenger.h"
 #include <cstring>
+#include "macAddresses.h"
 
 Messenger::Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver)
     : ownAddress_(ownAddress), transceiver_(transceiver) {}
 
-void Messenger::send(uint8_t target, DataID id, int32_t value) const {
-    sendRaw(target, id, DataType::INT32, reinterpret_cast<const uint8_t*>(&value), sizeof(value));
+bool Messenger::send(uint8_t target, DataID id, int32_t value) const {
+    return sendRaw(target, id, DataType::INT32, reinterpret_cast<const uint8_t*>(&value), sizeof(value));
 }
 
-void Messenger::send(uint8_t target, DataID id, uint32_t value) const {
-    sendRaw(target, id, DataType::UINT32, reinterpret_cast<const uint8_t*>(&value), sizeof(value));
+bool Messenger::send(uint8_t target, DataID id, uint32_t value) const {
+    return sendRaw(target, id, DataType::UINT32, reinterpret_cast<const uint8_t*>(&value), sizeof(value));
 }
 
-void Messenger::send(uint8_t target, DataID id, float value) const {
-    sendRaw(target, id, DataType::FLOAT32, reinterpret_cast<const uint8_t*>(&value), sizeof(value));
+bool Messenger::send(uint8_t target, DataID id, float value) const {
+    return sendRaw(target, id, DataType::FLOAT32, reinterpret_cast<const uint8_t*>(&value), sizeof(value));
 }
 
-void Messenger::send(uint8_t target, DataID id, const std::vector<int32_t>& values) const {
-    sendRaw(target, id, DataType::V_INT32, reinterpret_cast<const uint8_t*>(values.data()), values.size() * sizeof(int32_t));
+bool Messenger::send(uint8_t target, DataID id, const std::vector<int32_t>& values) const {
+    return sendRaw(target, id, DataType::V_INT32, reinterpret_cast<const uint8_t*>(values.data()), values.size() * sizeof(int32_t));
 }
 
-void Messenger::send(uint8_t target, DataID id, const std::vector<uint32_t>& values) const {
-    sendRaw(target, id, DataType::V_UINT32, reinterpret_cast<const uint8_t*>(values.data()), values.size() * sizeof(uint32_t));
+bool Messenger::send(uint8_t target, DataID id, const std::vector<uint32_t>& values) const {
+    return sendRaw(target, id, DataType::V_UINT32, reinterpret_cast<const uint8_t*>(values.data()), values.size() * sizeof(uint32_t));
 }
 
-void Messenger::send(uint8_t target, DataID id, const std::vector<float>& values) const {
-    sendRaw(target, id, DataType::V_FLOAT32, reinterpret_cast<const uint8_t*>(values.data()), values.size() * sizeof(float));
+bool Messenger::send(uint8_t target, DataID id, const std::vector<float>& values) const {
+    return sendRaw(target, id, DataType::V_FLOAT32, reinterpret_cast<const uint8_t*>(values.data()), values.size() * sizeof(float));
 }
 
-void Messenger::send(uint8_t target, DataID id, const std::string& value) const {
-    sendRaw(target, id, DataType::STRING, reinterpret_cast<const uint8_t*>(value.data()), value.size());
+bool Messenger::send(uint8_t target, DataID id, const std::string& value) const {
+    return sendRaw(target, id, DataType::STRING, reinterpret_cast<const uint8_t*>(value.data()), value.size());
 }
 
 bool Messenger::poll() {
@@ -98,7 +99,7 @@ std::string Messenger::getDataString() const {
     return std::string(lastPayload_.begin(), lastPayload_.end());
 }
 
-void Messenger::sendRaw(uint8_t target, DataID id, DataType type, const uint8_t* data, size_t size) const {
+bool Messenger::sendRaw(uint8_t target, DataID id, DataType type, const uint8_t* data, size_t size) const {
     std::vector<uint8_t> plainPacket;
     plainPacket.push_back(target);
     plainPacket.push_back(ownAddress_);
@@ -109,12 +110,11 @@ void Messenger::sendRaw(uint8_t target, DataID id, DataType type, const uint8_t*
     if (transceiver_->getBackEnd() == SecurePacketTransceiver::BackEnd::ESPNow) {
         auto it = phonebook::macAddresses.find(target);
         if (it != phonebook::macAddresses.end()) {
-            transceiver_->send(plainPacket, it->second);
+            return transceiver_->send(plainPacket, it->second);
         } else {
             // Target MAC not found
-            return;
+            return false;
         }
-    } else {
-        transceiver_->send(plainPacket);
-    }
+    } 
+    return transceiver_->send(plainPacket);
 }

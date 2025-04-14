@@ -6,13 +6,13 @@
 #include <cstdint>
 #include "SecurePacketTransceiver.h"
 #include "EncryptionHandler.h"
-#include "macAddresses.h"
 
 class Messenger {
 public:
     enum class DataID : uint8_t {
         SENSOR_DATA = 0x01,
-        LOG_DATA    = 0x02
+        LOG_DATA    = 0x02,
+        RESERVOIR_DATA = 0x03
     };
 
     enum class DataType : uint8_t {
@@ -28,13 +28,13 @@ public:
     Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver);
 
     // Sender overloads
-    void send(uint8_t target, DataID id, int32_t value) const;
-    void send(uint8_t target, DataID id, uint32_t value) const;
-    void send(uint8_t target, DataID id, float value) const;
-    void send(uint8_t target, DataID id, const std::vector<int32_t>& values) const;
-    void send(uint8_t target, DataID id, const std::vector<uint32_t>& values) const;
-    void send(uint8_t target, DataID id, const std::vector<float>& values) const;
-    void send(uint8_t target, DataID id, const std::string& value) const;
+    bool send(uint8_t target, DataID id, int32_t value) const;
+    bool send(uint8_t target, DataID id, uint32_t value) const;
+    bool send(uint8_t target, DataID id, float value) const;
+    bool send(uint8_t target, DataID id, const std::vector<int32_t>& values) const;
+    bool send(uint8_t target, DataID id, const std::vector<uint32_t>& values) const;
+    bool send(uint8_t target, DataID id, const std::vector<float>& values) const;
+    bool send(uint8_t target, DataID id, const std::string& value) const;
 
     bool poll();
 
@@ -53,7 +53,7 @@ public:
     std::string getDataString() const;
 
 private:
-    void sendRaw(uint8_t target, DataID id, DataType type, const uint8_t* data, size_t size) const;
+    bool sendRaw(uint8_t target, DataID id, DataType type, const uint8_t* data, size_t size) const;
 
     uint8_t ownAddress_;
     SecurePacketTransceiver* transceiver_;
