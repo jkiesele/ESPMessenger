@@ -96,22 +96,23 @@ void deserialize(std::vector<uint8_t>& packet, std::vector<T>& vec) {
         vec.push_back(element);
     }
 }
-
-// Serialize a string.
-inline void serialize(std::vector<uint8_t>& packet, const std::string& str) {
-    uint32_t size = static_cast<uint32_t>(str.size());
-    serialize(packet, size);
-    packet.insert(packet.end(), str.begin(), str.end());
+// Serialize a Arduino String by first serializing its length and then its content.
+inline void serialize(std::vector<uint8_t>& packet, const String& str) {
+    uint32_t length = str.length();
+    serialize(packet, length);
+    packet.insert(packet.end(), str.c_str(), str.c_str() + length);
 }
-// Deserialize a string.
-inline void deserialize(std::vector<uint8_t>& packet, std::string& str) {
-    uint32_t size;
-    deserialize(packet, size);
-    if (packet.size() < size) {//sanity check
-        throw std::runtime_error("Not enough data to deserialize string");
+// Deserialize a Arduino String by first reading its length and then its content.
+inline void deserialize(std::vector<uint8_t>& packet, String& str) {
+    uint32_t length;
+    deserialize(packet, length);
+    if (length > packet.size()) {
+        throw std::runtime_error("Not enough data to deserialize String");
     }
-    str.assign(reinterpret_cast<const char*>(packet.data()), size);
-    packet.erase(packet.begin(), packet.begin() + size);
+    str = String(reinterpret_cast<const char*>(packet.data()), length);
+    Serial.print("[DEBUG] Deserialized String: ");
+    Serial.println(str);
+    packet.erase(packet.begin(), packet.begin() + length);
 }
 
 // ---- now the actual data formats ----
@@ -119,7 +120,7 @@ inline void deserialize(std::vector<uint8_t>& packet, std::string& str) {
 // ---------------- LogString
 class LogString {
 public:
-    std::string message;
+    String message;
     uint32_t timestamp;
 };
 // serialize and deserialize
