@@ -4,7 +4,6 @@
 
 // Initialize static members
 SecurePacketTransceiver* SecurePacketTransceiver::instance_ = nullptr;
-portMUX_TYPE SecurePacketTransceiver::bufferMutex_ = portMUX_INITIALIZER_UNLOCKED;
 QueueHandle_t SecurePacketTransceiver::rxQueue_ = nullptr;
 
 SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend)
@@ -16,7 +15,6 @@ SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend)
         }
         instance_ = this;
         // Create a queue to hold pointers to std::vector<uint8_t>
-        // Here we set the queue length to, say, 5 (adjust as necessary).
         rxQueue_ = xQueueCreate(5, sizeof(std::vector<uint8_t>*));
         if (rxQueue_ == nullptr) {
             Serial.println("[ERROR] Failed to create rxQueue");
@@ -28,6 +26,7 @@ SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend)
 SecurePacketTransceiver::~SecurePacketTransceiver() {
     if (backend_ == BackEnd::ESPNow && instance_ == this) {
         esp_now_unregister_recv_cb();
+        esp_now_unregister_send_cb();
         esp_now_deinit();
         instance_ = nullptr;
         if (rxQueue_ != nullptr) {
@@ -84,13 +83,6 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
         esp_err_t result = esp_now_send(destAddress.data(), encrypted.data(), encrypted.size());
         return result == ESP_OK;
     }
-    if (backend_ == BackEnd::MOCK) {
-        std::cout << "[Mock Send] Sending plain packet: ";
-        printVector(plainPacket);
-        std::cout << "[Mock Send] Encrypted: ";
-        printVector(encrypted);
-        return true;
-    }
     return false;
 }
 
@@ -99,27 +91,18 @@ bool SecurePacketTransceiver::receive(std::vector<uint8_t>& decryptedPacket) {
         // Try to receive a pointer from the queue (non-blocking)
         std::vector<uint8_t>* pData = nullptr;
         if (xQueueReceive(rxQueue_, &pData, 0) == pdTRUE && pData != nullptr) {
-            // pData now holds the received packet data
+            Serial.println("[INFO] Receiving packet...");
             bool success = encryptionHandler_.decrypt(*pData, decryptedPacket);
-            delete pData;  // free the dynamically allocated vector
+            delete pData;  // Free the dynamically allocated vector
             return success;
         }
         return false;
     }
-    // MOCK implementation:
-    // (Your existing MOCK code could be here)
     return false;
 }
 
 SecurePacketTransceiver::BackEnd SecurePacketTransceiver::getBackEnd() const {
     return backend_;
-}
-
-void SecurePacketTransceiver::printVector(const std::vector<uint8_t>& data) {
-    for (uint8_t byte : data) {
-        std::cout << std::hex << static_cast<int>(byte) << ' ';
-    }
-    std::cout << std::dec << std::endl;
 }
 
 void SecurePacketTransceiver::onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
@@ -130,15 +113,11 @@ void SecurePacketTransceiver::onEspNowRecv(const uint8_t* mac, const uint8_t* da
 
 void SecurePacketTransceiver::handleEspNowRecv(const uint8_t* data, int len) {
     // Allocate a new vector to hold the received data.
-    // (Be careful with allocations in a callback; consider a memory pool for production.)
     std::vector<uint8_t>* pPacket = new std::vector<uint8_t>(data, data + len);
-    
-    // Post the pointer to the rxQueue_.
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     if (rxQueue_ != nullptr) {
         xQueueSendFromISR(rxQueue_, &pPacket, &xHigherPriorityTaskWoken);
     }
-    // (Optionally, yield if a higher-priority task was woken.)
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
