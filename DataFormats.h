@@ -139,7 +139,8 @@ public:
     
      enum class State : uint8_t {
         EMPTY = 0x00,
-        FULL = 0x01
+        FULL = 0x01,
+        MEDIUM = 0x02,
     };
     ReservoirInfo() : state(State::EMPTY), temperature(0.0f), humidity(0.0f) {}
 
