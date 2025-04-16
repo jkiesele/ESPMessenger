@@ -2,54 +2,75 @@
 #include <iostream>
 #include <cstring>
 
-#ifdef ESP32
+// Initialize static members
 SecurePacketTransceiver* SecurePacketTransceiver::instance_ = nullptr;
-#endif
+portMUX_TYPE SecurePacketTransceiver::bufferMutex_ = portMUX_INITIALIZER_UNLOCKED;
+QueueHandle_t SecurePacketTransceiver::rxQueue_ = nullptr;
 
 SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend)
     : backend_(backend), sendBusy_(false) {
-#ifdef ESP32
     if (backend_ == BackEnd::ESPNow) {
         if (instance_ != nullptr) {
             Serial.println("[ERROR] Only one SecurePacketTransceiver allowed in ESPNow mode.");
             abort();
         }
-
         instance_ = this;
+        // Create a queue to hold pointers to std::vector<uint8_t>
+        // Here we set the queue length to, say, 5 (adjust as necessary).
+        rxQueue_ = xQueueCreate(5, sizeof(std::vector<uint8_t>*));
+        if (rxQueue_ == nullptr) {
+            Serial.println("[ERROR] Failed to create rxQueue");
+            abort();
+        }
     }
-#endif
 }
 
 SecurePacketTransceiver::~SecurePacketTransceiver() {
-#ifdef ESP32
     if (backend_ == BackEnd::ESPNow && instance_ == this) {
         esp_now_unregister_recv_cb();
         esp_now_deinit();
         instance_ = nullptr;
+        if (rxQueue_ != nullptr) {
+            vQueueDelete(rxQueue_);
+            rxQueue_ = nullptr;
+        }
     }
-#endif
+}
+
+void SecurePacketTransceiver::begin() {
+    if (backend_ == BackEnd::ESPNow) {
+        wifi_mode_t mode;
+        esp_wifi_get_mode(&mode);
+        if (mode != WIFI_STA && mode != WIFI_AP_STA) {
+            Serial.println("[ERROR] ESP-NOW requires WIFI_STA or WIFI_AP_STA mode.");
+            abort();
+        }
+        if (esp_now_init() != ESP_OK) {
+            Serial.println("[ERROR] Failed to initialize ESP-NOW");
+            abort();
+        }
+        else {
+            esp_now_register_recv_cb(onEspNowRecv);
+            esp_now_register_send_cb(onEspNowSend);
+        }
+    }
 }
 
 bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, const std::vector<uint8_t>& destAddress) {
     std::vector<uint8_t> encrypted = encryptionHandler_.encrypt(plainPacket);
-
-#ifdef ESP32
     if (backend_ == BackEnd::ESPNow) {
         if (destAddress.size() != 6) {
             Serial.println("[ERROR] ESPNow destination address must be 6 bytes.");
             return false;
         }
-
-        //
         uint8_t channel;
         wifi_second_chan_t secondary;
         esp_wifi_get_channel(&channel, &secondary);
         esp_now_peer_info_t peerInfo = {};
         memcpy(peerInfo.peer_addr, destAddress.data(), 6);
         peerInfo.channel = channel;
-        peerInfo.ifidx = WIFI_IF_STA; // Set the interface index (or WIFI_IF_AP if applicable)
+        peerInfo.ifidx = WIFI_IF_STA;
         peerInfo.encrypt = false;
-
         if (!esp_now_is_peer_exist(destAddress.data())) {
             auto ret = esp_now_add_peer(&peerInfo);
             if (ret != ESP_OK) {
@@ -63,46 +84,30 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
         esp_err_t result = esp_now_send(destAddress.data(), encrypted.data(), encrypted.size());
         return result == ESP_OK;
     }
-#endif
-
     if (backend_ == BackEnd::MOCK) {
         std::cout << "[Mock Send] Sending plain packet: ";
         printVector(plainPacket);
         std::cout << "[Mock Send] Encrypted: ";
         printVector(encrypted);
-        buffer_ = encrypted;
         return true;
     }
-
     return false;
 }
 
 bool SecurePacketTransceiver::receive(std::vector<uint8_t>& decryptedPacket) {
-#ifdef ESP32
     if (backend_ == BackEnd::ESPNow) {
-        if (buffer_.empty()) return false;
-        bool success = encryptionHandler_.decrypt(buffer_, decryptedPacket);
-        buffer_.clear();
-        return success;
-    }
-#endif
-
-    if (backend_ == BackEnd::MOCK) {
-        if (buffer_.empty()) {
-            std::cerr << "[Mock Receive] No packet available.\n";
-            return false;
+        // Try to receive a pointer from the queue (non-blocking)
+        std::vector<uint8_t>* pData = nullptr;
+        if (xQueueReceive(rxQueue_, &pData, 0) == pdTRUE && pData != nullptr) {
+            // pData now holds the received packet data
+            bool success = encryptionHandler_.decrypt(*pData, decryptedPacket);
+            delete pData;  // free the dynamically allocated vector
+            return success;
         }
-
-        bool success = encryptionHandler_.decrypt(buffer_, decryptedPacket);
-        if (success) {
-            std::cout << "[Mock Receive] Decryption successful: ";
-            printVector(decryptedPacket);
-        } else {
-            std::cerr << "[Mock Receive] Decryption failed.\n";
-        }
-        return success;
+        return false;
     }
-
+    // MOCK implementation:
+    // (Your existing MOCK code could be here)
     return false;
 }
 
@@ -117,7 +122,6 @@ void SecurePacketTransceiver::printVector(const std::vector<uint8_t>& data) {
     std::cout << std::dec << std::endl;
 }
 
-#ifdef ESP32
 void SecurePacketTransceiver::onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     if (instance_) {
         instance_->handleEspNowRecv(data, len);
@@ -125,9 +129,19 @@ void SecurePacketTransceiver::onEspNowRecv(const uint8_t* mac, const uint8_t* da
 }
 
 void SecurePacketTransceiver::handleEspNowRecv(const uint8_t* data, int len) {
-    buffer_.assign(data, data + len);
-    Serial.println("[ESPNow] Received data");
+    // Allocate a new vector to hold the received data.
+    // (Be careful with allocations in a callback; consider a memory pool for production.)
+    std::vector<uint8_t>* pPacket = new std::vector<uint8_t>(data, data + len);
+    
+    // Post the pointer to the rxQueue_.
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (rxQueue_ != nullptr) {
+        xQueueSendFromISR(rxQueue_, &pPacket, &xHigherPriorityTaskWoken);
+    }
+    // (Optionally, yield if a higher-priority task was woken.)
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
+
 void SecurePacketTransceiver::onEspNowSend(const uint8_t* mac, esp_now_send_status_t status) {
     if (instance_) {
         instance_->handleEspNowSend(status);
@@ -137,4 +151,3 @@ void SecurePacketTransceiver::onEspNowSend(const uint8_t* mac, esp_now_send_stat
 void SecurePacketTransceiver::handleEspNowSend(esp_now_send_status_t status) {
     sendBusy_ = false;
 }
-#endif
