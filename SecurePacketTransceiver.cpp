@@ -40,14 +40,22 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
             return false;
         }
 
+        //
+        uint8_t channel;
+        wifi_second_chan_t secondary;
+        esp_wifi_get_channel(&channel, &secondary);
         esp_now_peer_info_t peerInfo = {};
         memcpy(peerInfo.peer_addr, destAddress.data(), 6);
-        peerInfo.channel = 0;
+        peerInfo.channel = channel;
+        peerInfo.ifidx = WIFI_IF_STA; // Set the interface index (or WIFI_IF_AP if applicable)
         peerInfo.encrypt = false;
 
         if (!esp_now_is_peer_exist(destAddress.data())) {
-            if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-                Serial.println("[ERROR] Failed to add ESPNow peer");
+            auto ret = esp_now_add_peer(&peerInfo);
+            if (ret != ESP_OK) {
+                Serial.print("[ERROR] Failed to add ESPNow peer, error code: ");
+                Serial.print(ret);
+                Serial.print("\n");
                 return false;
             }
         }
