@@ -44,13 +44,27 @@ bool Messenger::sendRaw(uint8_t target, DataFormats::DataType type, const std::v
     plainPacket.insert(plainPacket.end(), data.begin(), data.end());
 
     if (transceiver_->getBackEnd() == SecurePacketTransceiver::BackEnd::ESPNow) {
-        auto it = phonebook::macAddresses.find(target);
-        if (it != phonebook::macAddresses.end()) {
-            return transceiver_->send(plainPacket, it->second);
-        } else {
-            // Target MAC not found
+        //see if we find the mac address in the phonebook (vector)
+        size_t index = target;
+        if (index >= phonebook::macAddresses.size()) {
+            Serial.println("[ERROR] Invalid target address");
             return false;
         }
+        const std::vector<uint8_t>& macAddress = phonebook::macAddresses[index];
+        if (macAddress.empty()) {
+            Serial.println("[ERROR] No MAC address found for target");
+            return false;
+        }
+        if (macAddress.size() != 6) {
+            Serial.println("[ERROR] Invalid MAC address size");
+            return false;
+        }
+        // Send the packet to the target address
+        if (!transceiver_->send(plainPacket, macAddress)) {
+            Serial.println("[ERROR] Failed to send packet");
+            return false;
+        }
+        return true;
     } 
     return transceiver_->send(plainPacket);
 }
