@@ -33,7 +33,9 @@ public:
         DataFormats::serialize(data, value);
         return sendRaw(target, type, data);
     }
-
+    void begin() {
+        transceiver_->begin();
+    }
 
     bool poll();
 

@@ -15,20 +15,7 @@ SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend)
             abort();
         }
 
-        wifi_mode_t mode;
-        esp_wifi_get_mode(&mode);
-        if (mode != WIFI_STA && mode != WIFI_AP_STA) {
-            Serial.println("[ERROR] ESP-NOW requires WIFI_STA or WIFI_AP_STA mode.");
-            abort();
-        }
-
-        if (esp_now_init() != ESP_OK) {
-            Serial.println("[ERROR] Failed to initialize ESP-NOW");
-            abort();
-        }
-
         instance_ = this;
-        esp_now_register_recv_cb(onEspNowRecv);
     }
 #endif
 }

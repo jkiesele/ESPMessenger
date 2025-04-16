@@ -22,6 +22,35 @@ public:
     SecurePacketTransceiver(BackEnd backend = BackEnd::MOCK);
     ~SecurePacketTransceiver();
 
+    void begin() {
+        // Initialization code if needed
+        if(backend_ == BackEnd::ESPNow) {
+            wifi_mode_t mode;
+            esp_wifi_get_mode(&mode);
+            if (mode != WIFI_STA && mode != WIFI_AP_STA) {
+                Serial.println("[ERROR] ESP-NOW requires WIFI_STA or WIFI_AP_STA mode.");
+                abort();
+            }
+    
+            if (esp_now_init() != ESP_OK) {
+                Serial.println("[ERROR] Failed to initialize ESP-NOW");
+                abort();
+            }
+
+            #ifdef ESP32
+            if (esp_now_init() != ESP_OK) {
+                Serial.println("[ERROR] Failed to initialize ESP-NOW");
+                abort();
+            }
+            else{
+                esp_now_register_recv_cb(onEspNowRecv);
+            }
+            #endif
+        }
+
+
+        
+    }
     bool send(const std::vector<uint8_t>& plainPacket, const std::vector<uint8_t>& destAddress = {});
     bool receive(std::vector<uint8_t>& decryptedPacket);
     BackEnd getBackEnd() const;
