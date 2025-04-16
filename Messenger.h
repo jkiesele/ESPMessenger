@@ -26,6 +26,10 @@ public:
         }
     }
 
+    void begin() {
+        transceiver_->begin();
+    }
+
     // Send
     template <class T>
     bool send(uint8_t target, DataFormats::DataType type, T value) const{
@@ -33,10 +37,10 @@ public:
         DataFormats::serialize(data, value);
         return sendRaw(target, type, data);
     }
-    void begin() {
-        transceiver_->begin();
+    bool isSendBusy() const {
+        return transceiver_->isSendBusy();
     }
-
+    
     // Receive functions. Their order here means something and should be used like this in code.
 
     // use this to poll for new messages

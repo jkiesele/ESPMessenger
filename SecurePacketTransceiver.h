@@ -27,6 +27,9 @@ public:
     void begin();
     bool send(const std::vector<uint8_t>& plainPacket, const std::vector<uint8_t>& destAddress = {});
     bool receive(std::vector<uint8_t>& decryptedPacket);
+    bool isSendBusy() const {
+        return sendBusy_;
+    }
     BackEnd getBackEnd() const;
 
 private:
