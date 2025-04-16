@@ -6,62 +6,57 @@
 #include <cstdint>
 #include "SecurePacketTransceiver.h"
 #include "EncryptionHandler.h"
+#include "DataFormats.h"
+
+
+enum Adresses {
+    BROADCAST_ADDRESS = 0xFF,
+    SB_RESERVOIR_ADDRESS = 0x00,
+    OSMO_CONTROLLER_ADDRESS = 0x01
+};
 
 class Messenger {
 public:
-    enum class DataID : uint8_t {
-        SENSOR_DATA = 0x01,
-        LOG_DATA    = 0x02,
-        RESERVOIR_DATA = 0x03
-    };
+    
 
-    enum class DataType : uint8_t {
-        INT32      = 0x01,
-        UINT32     = 0x02,
-        FLOAT32    = 0x03,
-        V_INT32    = 0x04,
-        V_UINT32   = 0x05,
-        V_FLOAT32  = 0x06,
-        STRING     = 0x07
-    };
+    Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver=nullptr);
+    ~Messenger(){
+        if (ownsTransceiver_) {
+            delete transceiver_;
+        }
+    }
 
-    Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver);
+    // Send
+    template <class T>
+    bool send(uint8_t target, DataFormats::DataType type, T value) const{
+        std::vector<uint8_t> data;
+        DataFormats::serialize(data, value);
+        return sendRaw(target, type, data);
+    }
 
-    // Sender overloads
-    bool send(uint8_t target, DataID id, int32_t value) const;
-    bool send(uint8_t target, DataID id, uint32_t value) const;
-    bool send(uint8_t target, DataID id, float value) const;
-    bool send(uint8_t target, DataID id, const std::vector<int32_t>& values) const;
-    bool send(uint8_t target, DataID id, const std::vector<uint32_t>& values) const;
-    bool send(uint8_t target, DataID id, const std::vector<float>& values) const;
-    bool send(uint8_t target, DataID id, const std::string& value) const;
 
     bool poll();
 
     // Getters
-    DataID getLastDataID() const;
-    DataType getLastDataType() const;
+    DataFormats::DataType getLastDataType() const;
     uint8_t getLastSender() const;
 
-    // Typed access to payload
-    int32_t getDataInt32() const;
-    uint32_t getDataUInt32() const;
-    float getDataFloat32() const;
-    std::vector<int32_t> getDataVInt32() const;
-    std::vector<uint32_t> getDataVUInt32() const;
-    std::vector<float> getDataVFloat32() const;
-    std::string getDataString() const;
+    const std::vector<uint8_t>& getLastPayload() const {
+        return lastPayload_;
+    }
+
 
 private:
-    bool sendRaw(uint8_t target, DataID id, DataType type, const uint8_t* data, size_t size) const;
+    constexpr static size_t HEADER_SIZE = 3;
+    bool sendRaw(uint8_t target, DataFormats::DataType type, const std::vector<uint8_t>& data) const;
 
     uint8_t ownAddress_;
     SecurePacketTransceiver* transceiver_;
+    bool ownsTransceiver_;
     mutable EncryptionHandler encryptionHandler_;
 
     uint8_t lastFrom_ = 0;
-    DataID lastDataID_ = DataID::SENSOR_DATA;
-    DataType lastDataType_ = DataType::INT32;
+    DataFormats::DataType lastDataType_ = DataFormats::DataType::UNKNOWN;
     std::vector<uint8_t> lastPayload_;
 };
 
