@@ -37,14 +37,31 @@ public:
         transceiver_->begin();
     }
 
+    // Receive functions. Their order here means something and should be used like this in code.
+
+    // use this to poll for new messages
+    // returns true if a new message was received
     bool poll();
 
-    // Getters
+    // returns true if a new message was received upon last call of poll
+    bool hasNewData() const {
+        return hasNewData_;
+    }
+
+    // is this data I want to handle?
     DataFormats::DataType getLastDataType() const;
     uint8_t getLastSender() const;
 
     const std::vector<uint8_t>& getLastPayload() const {
         return lastPayload_;
+    }
+
+    // clears the buffer once the message has been handled
+    void clearForNewPacket() {
+        lastFrom_ = 0;
+        lastDataType_ = DataFormats::DataType::UNKNOWN;
+        lastPayload_.clear();
+        hasNewData_ = false;
     }
 
 
@@ -60,6 +77,7 @@ private:
     uint8_t lastFrom_ = 0;
     DataFormats::DataType lastDataType_ = DataFormats::DataType::UNKNOWN;
     std::vector<uint8_t> lastPayload_;
+    bool hasNewData_ = false;
 };
 
 #endif // MESSENGER_H

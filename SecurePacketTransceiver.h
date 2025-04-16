@@ -44,6 +44,7 @@ public:
             }
             else{
                 esp_now_register_recv_cb(onEspNowRecv);
+                esp_now_register_send_cb(onEspNowSend); 
             }
             #endif
         }
@@ -66,7 +67,11 @@ private:
     static SecurePacketTransceiver* instance_;
     static void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len);
     void handleEspNowRecv(const uint8_t* data, int len);
+    static void onEspNowSend(const uint8_t* mac, esp_now_send_status_t status);
+    void handleEspNowSend(esp_now_send_status_t status);
 #endif
+    bool sendBusy_ ;
+
 };
 
 #endif // SECURE_PACKET_TRANSCEIVER_H

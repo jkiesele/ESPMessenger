@@ -7,7 +7,7 @@ SecurePacketTransceiver* SecurePacketTransceiver::instance_ = nullptr;
 #endif
 
 SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend)
-    : backend_(backend) {
+    : backend_(backend), sendBusy_(false) {
 #ifdef ESP32
     if (backend_ == BackEnd::ESPNow) {
         if (instance_ != nullptr) {
@@ -59,7 +59,7 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
                 return false;
             }
         }
-
+        sendBusy_ = true;
         esp_err_t result = esp_now_send(destAddress.data(), encrypted.data(), encrypted.size());
         return result == ESP_OK;
     }
@@ -126,5 +126,15 @@ void SecurePacketTransceiver::onEspNowRecv(const uint8_t* mac, const uint8_t* da
 
 void SecurePacketTransceiver::handleEspNowRecv(const uint8_t* data, int len) {
     buffer_.assign(data, data + len);
+    Serial.println("[ESPNow] Received data");
+}
+void SecurePacketTransceiver::onEspNowSend(const uint8_t* mac, esp_now_send_status_t status) {
+    if (instance_) {
+        instance_->handleEspNowSend(status);
+    }
+}
+
+void SecurePacketTransceiver::handleEspNowSend(esp_now_send_status_t status) {
+    sendBusy_ = false;
 }
 #endif

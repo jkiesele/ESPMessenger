@@ -23,6 +23,7 @@ bool Messenger::poll() {
     lastFrom_ = decrypted[1];
     lastDataType_ = static_cast<DataFormats::DataType>(decrypted[2]);
     lastPayload_.assign(decrypted.begin() + HEADER_SIZE, decrypted.end());
+    hasNewData_ = true;
     return true;
 }
 
