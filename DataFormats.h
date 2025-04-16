@@ -90,6 +90,7 @@ void deserialize(std::vector<uint8_t>& packet, std::vector<T>& vec) {
     uint32_t size;
     deserialize(packet, size);
     vec.clear();
+    vec.reserve(size); // Reserve space for the elements
     for (uint32_t i = 0; i < size; i++) {
         T element;
         deserialize(packet, element);
@@ -110,8 +111,6 @@ inline void deserialize(std::vector<uint8_t>& packet, String& str) {
         throw std::runtime_error("Not enough data to deserialize String");
     }
     str = String(reinterpret_cast<const char*>(packet.data()), length);
-    Serial.print("[DEBUG] Deserialized String: ");
-    Serial.println(str);
     packet.erase(packet.begin(), packet.begin() + length);
 }
 
