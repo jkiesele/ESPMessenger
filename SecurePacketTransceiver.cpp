@@ -91,7 +91,6 @@ bool SecurePacketTransceiver::receive(std::vector<uint8_t>& decryptedPacket) {
         // Try to receive a pointer from the queue (non-blocking)
         std::vector<uint8_t>* pData = nullptr;
         if (xQueueReceive(rxQueue_, &pData, 0) == pdTRUE && pData != nullptr) {
-            Serial.println("[INFO] Receiving packet...");
             bool success = encryptionHandler_.decrypt(*pData, decryptedPacket);
             delete pData;  // Free the dynamically allocated vector
             return success;
