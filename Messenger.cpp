@@ -2,11 +2,15 @@
 #include <LoggingBase.h>
 #include <cstring>
 
-Messenger::Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver,
-                    const std::vector<std::vector<uint8_t>> * macAdresses)
+Messenger::Messenger(uint8_t ownAddress, 
+                     const std::vector<std::vector<uint8_t>> * macAdresses,
+                     const std::vector<uint32_t> * encryptionKeys,
+                     SecurePacketTransceiver* transceiver)
     : ownAddress_(ownAddress), transceiver_(transceiver), macAdresses_(macAdresses) {
         if(transceiver == nullptr) {
-            transceiver_ = new SecurePacketTransceiver(SecurePacketTransceiver::BackEnd::ESPNow);
+            transceiver_ = new SecurePacketTransceiver(
+                SecurePacketTransceiver::BackEnd::ESPNow,
+                encryptionKeys);
             ownsTransceiver_ = true;
         } else {
             ownsTransceiver_ = false;

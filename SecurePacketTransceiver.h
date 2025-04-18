@@ -20,7 +20,8 @@ public:
         TCP
     };
 
-    SecurePacketTransceiver(BackEnd backend = BackEnd::MOCK, const std::vector<uint32_t> * encryptionKeys=0);
+    SecurePacketTransceiver(BackEnd backend = BackEnd::MOCK, 
+        const std::vector<uint32_t> * encryptionKeys=0);
     ~SecurePacketTransceiver();
 
     void begin();

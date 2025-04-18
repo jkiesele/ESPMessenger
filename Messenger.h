@@ -19,8 +19,10 @@ class Messenger {
 public:
     
 
-    Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver=nullptr,
-             const std::vector<std::vector<uint8_t>> * macAdresses=0);
+    Messenger(uint8_t ownAddress, 
+             const std::vector<std::vector<uint8_t>> * macAdresses=0,
+             const std::vector<uint32_t> * encryptionKeys=0,
+             SecurePacketTransceiver* transceiver=nullptr);
     ~Messenger(){
         if (ownsTransceiver_) {
             delete transceiver_;
