@@ -1,23 +1,25 @@
 #include "SecurePacketTransceiver.h"
 #include <iostream>
 #include <cstring>
+#include <LoggingBase.h>
 
 // Initialize static members
 SecurePacketTransceiver* SecurePacketTransceiver::instance_ = nullptr;
 QueueHandle_t SecurePacketTransceiver::rxQueue_ = nullptr;
 
-SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend)
-    : backend_(backend), sendBusy_(false) {
+SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend,
+    const std::vector<uint32_t> * encryptionKeys)
+    : encryptionHandler_(encryptionKeys), backend_(backend), sendBusy_(false) {
     if (backend_ == BackEnd::ESPNow) {
         if (instance_ != nullptr) {
-            Serial.println("[ERROR] Only one SecurePacketTransceiver allowed in ESPNow mode.");
+            gLogger->println("[ERROR] Only one SecurePacketTransceiver allowed in ESPNow mode.");
             abort();
         }
         instance_ = this;
         // Create a queue to hold pointers to std::vector<uint8_t>
         rxQueue_ = xQueueCreate(5, sizeof(std::vector<uint8_t>*));
         if (rxQueue_ == nullptr) {
-            Serial.println("[ERROR] Failed to create rxQueue");
+            gLogger->println("[ERROR] Failed to create rxQueue");
             abort();
         }
     }
@@ -41,11 +43,11 @@ void SecurePacketTransceiver::begin() {
         wifi_mode_t mode;
         esp_wifi_get_mode(&mode);
         if (mode != WIFI_STA && mode != WIFI_AP_STA) {
-            Serial.println("[ERROR] ESP-NOW requires WIFI_STA or WIFI_AP_STA mode.");
+            gLogger->println("[ERROR] ESP-NOW requires WIFI_STA or WIFI_AP_STA mode.");
             abort();
         }
         if (esp_now_init() != ESP_OK) {
-            Serial.println("[ERROR] Failed to initialize ESP-NOW");
+            gLogger->println("[ERROR] Failed to initialize ESP-NOW");
             abort();
         }
         else {
@@ -59,7 +61,7 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
     std::vector<uint8_t> encrypted = encryptionHandler_.encrypt(plainPacket);
     if (backend_ == BackEnd::ESPNow) {
         if (destAddress.size() != 6) {
-            Serial.println("[ERROR] ESPNow destination address must be 6 bytes.");
+            gLogger->println("[ERROR] ESPNow destination address must be 6 bytes.");
             return false;
         }
         uint8_t channel;
@@ -73,9 +75,8 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
         if (!esp_now_is_peer_exist(destAddress.data())) {
             auto ret = esp_now_add_peer(&peerInfo);
             if (ret != ESP_OK) {
-                Serial.print("[ERROR] Failed to add ESPNow peer, error code: ");
-                Serial.print(ret);
-                Serial.print("\n");
+                gLogger->print("[ERROR] Failed to add ESPNow peer, error code: ");
+                gLogger->println(ret);
                 return false;
             }
         }

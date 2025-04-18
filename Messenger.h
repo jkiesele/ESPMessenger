@@ -19,7 +19,8 @@ class Messenger {
 public:
     
 
-    Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver=nullptr);
+    Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver=nullptr,
+             const std::vector<std::vector<uint8_t>> * macAdresses=0);
     ~Messenger(){
         if (ownsTransceiver_) {
             delete transceiver_;
@@ -76,12 +77,12 @@ private:
     uint8_t ownAddress_;
     SecurePacketTransceiver* transceiver_;
     bool ownsTransceiver_;
-    mutable EncryptionHandler encryptionHandler_;
 
     uint8_t lastFrom_ = 0;
     DataFormats::DataType lastDataType_ = DataFormats::DataType::UNKNOWN;
     std::vector<uint8_t> lastPayload_;
     bool hasNewData_ = false;
+    const std::vector<std::vector<uint8_t>> * macAdresses_;
 };
 
 #endif // MESSENGER_H

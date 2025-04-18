@@ -1,5 +1,4 @@
 #include "EncryptionHandler.h"
-#include "passwords.h"
 #include <cstring>  // for std::memcpy
 
 #ifdef ESP32
@@ -28,7 +27,7 @@ uint32_t CRC32::calculate(const uint8_t* data, size_t length) {
 
 // ---------------- EncryptionHandler Implementation ----------------
 
-EncryptionHandler::EncryptionHandler() : keyIndex_(0) {}
+EncryptionHandler::EncryptionHandler(const std::vector<uint32_t> * encryptionKeys) : keyIndex_(0), encryptionKeys_(encryptionKeys) {}
 
 std::vector<uint8_t> EncryptionHandler::encrypt(const std::vector<uint8_t>& data) const {
     std::vector<uint8_t> result = data;
@@ -37,19 +36,28 @@ std::vector<uint8_t> EncryptionHandler::encrypt(const std::vector<uint8_t>& data
     const uint8_t* checksumPtr = reinterpret_cast<const uint8_t*>(&checksum);
     result.insert(result.end(), checksumPtr, checksumPtr + CHECKSUM_SIZE);
 
-    const uint32_t key = secret::encryption_keys[keyIndex_];
+    if(!encryptionKeys_ || encryptionKeys_->empty()){
+        return result; //no encryption
+    }
+
+    const uint32_t key = encryptionKeys_->at(keyIndex_);
     for (size_t i = 0; i < result.size(); ++i) {
         result[i] ^= reinterpret_cast<const uint8_t*>(&key)[i % 4];
     }
 
-    keyIndex_ = (keyIndex_ + 1) % secret::encryption_keys.size();
+    keyIndex_ = (keyIndex_ + 1) % encryptionKeys_->size();
     return result;
 }
 
 bool EncryptionHandler::decrypt(const std::vector<uint8_t>& encryptedData, std::vector<uint8_t>& output) const {
     if (encryptedData.size() < CHECKSUM_SIZE) return false;
 
-    for (const uint32_t& key : secret::encryption_keys) {
+    if(!encryptionKeys_ || encryptionKeys_->empty()){
+        output.assign(encryptedData.begin(), encryptedData.end() - CHECKSUM_SIZE);
+        return true; //no encryption
+    }
+
+    for (const uint32_t& key : *encryptionKeys_) {
         std::vector<uint8_t> temp = encryptedData;
 
         for (size_t i = 0; i < temp.size(); ++i) {

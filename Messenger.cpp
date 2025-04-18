@@ -1,9 +1,10 @@
 #include "Messenger.h"
+#include <LoggingBase.h>
 #include <cstring>
-#include "macAddresses.h"
 
-Messenger::Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver)
-    : ownAddress_(ownAddress), transceiver_(transceiver) {
+Messenger::Messenger(uint8_t ownAddress, SecurePacketTransceiver* transceiver,
+                    const std::vector<std::vector<uint8_t>> * macAdresses)
+    : ownAddress_(ownAddress), transceiver_(transceiver), macAdresses_(macAdresses) {
         if(transceiver == nullptr) {
             transceiver_ = new SecurePacketTransceiver(SecurePacketTransceiver::BackEnd::ESPNow);
             ownsTransceiver_ = true;
@@ -47,22 +48,26 @@ bool Messenger::sendRaw(uint8_t target, DataFormats::DataType type, const std::v
     if (transceiver_->getBackEnd() == SecurePacketTransceiver::BackEnd::ESPNow) {
         //see if we find the mac address in the phonebook (vector)
         size_t index = target;
-        if (index >= phonebook::macAddresses.size()) {
-            Serial.println("[ERROR] Invalid target address");
+        if( macAdresses_ == nullptr){
+            gLogger->println("[Messenger ERROR] No mac address phonebook available");
             return false;
         }
-        const std::vector<uint8_t>& macAddress = phonebook::macAddresses[index];
+        if (index >= macAdresses_->size()) {
+            gLogger->println("[Messenger ERROR] Invalid target address");
+            return false;
+        }
+        const std::vector<uint8_t>& macAddress = macAdresses_->at(index);
         if (macAddress.empty()) {
-            Serial.println("[ERROR] No MAC address found for target");
+            gLogger->println("[Messenger ERROR] No MAC address found for target");
             return false;
         }
         if (macAddress.size() != 6) {
-            Serial.println("[ERROR] Invalid MAC address size");
+            gLogger->println("[Messenger ERROR] Invalid MAC address size");
             return false;
         }
         // Send the packet to the target address
         if (!transceiver_->send(plainPacket, macAddress)) {
-            Serial.println("[ERROR] Failed to send packet");
+            gLogger->println("[Messenger ERROR] Failed to send packet");
             return false;
         }
         return true;
