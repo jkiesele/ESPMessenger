@@ -149,10 +149,17 @@ public:
     float humidity;
 
     //#ifdef DEBUG //for now
+    inline static String stateToString(State s){
+        switch (s) {
+            case State::EMPTY: return "EMPTY";
+            case State::FULL: return "FULL";
+            case State::MEDIUM: return "MEDIUM";
+            default: return "UNKNOWN";
+        }
+    }
     //define stringification (arduino Stringify)
     operator String() const {
-        String result = "ReservoirInfo: ";
-        result += "State: " + String(static_cast<uint8_t>(state)) + ", ";
+        String result = "State: " + stateToString(state) + ", ";
         result += "Temperature: " + String(temperature) + ", ";
         result += "Humidity: " + String(humidity);
         return result;
