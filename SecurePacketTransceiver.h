@@ -30,6 +30,11 @@ public:
     bool isSendBusy() const { return sendBusy_; }
     BackEnd getBackEnd() const;
 
+    // -1 will use the connected wifi channel
+    void setFixedChannel(int8_t channel){
+        channel_ = channel;
+    }
+
 private:
     EncryptionHandler encryptionHandler_;
     BackEnd backend_;
@@ -44,6 +49,8 @@ private:
     static QueueHandle_t rxQueue_; // Queue of pointers to std::vector<uint8_t>
 
     std::atomic<bool> sendBusy_;
+    int8_t channel_;
+
 };
 
 #endif // SECURE_PACKET_TRANSCEIVER_H

@@ -33,6 +33,10 @@ public:
         transceiver_->begin();
     }
 
+    SecurePacketTransceiver* getTransceiver() {
+        return transceiver_;
+    }
+
     // Send
     template <class T>
     bool send(uint8_t target, DataFormats::DataType type, T value) const{

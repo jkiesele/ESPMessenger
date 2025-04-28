@@ -30,6 +30,7 @@ uint32_t CRC32::calculate(const uint8_t* data, size_t length) {
 EncryptionHandler::EncryptionHandler(const std::vector<uint32_t> * encryptionKeys) : keyIndex_(0), encryptionKeys_(encryptionKeys) {}
 
 std::vector<uint8_t> EncryptionHandler::encrypt(const std::vector<uint8_t>& data) const {
+    randomizeKeyIndex();
     std::vector<uint8_t> result = data;
 
     uint32_t checksum = CRC32::calculate(data.data(), data.size());
@@ -45,7 +46,6 @@ std::vector<uint8_t> EncryptionHandler::encrypt(const std::vector<uint8_t>& data
         result[i] ^= reinterpret_cast<const uint8_t*>(&key)[i % 4];
     }
 
-    keyIndex_ = (keyIndex_ + 1) % encryptionKeys_->size();
     return result;
 }
 

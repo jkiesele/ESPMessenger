@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <cstdlib> // for rand()
 
 class CRC32 {
 public:
@@ -19,6 +20,9 @@ public:
     bool decrypt(const std::vector<uint8_t>& encryptedData, std::vector<uint8_t>& output) const;
 
 private:
+    void randomizeKeyIndex() const {
+        keyIndex_ = rand() % encryptionKeys_->size();
+    }
     mutable size_t keyIndex_;
     const std::vector<uint32_t> * encryptionKeys_;
 };

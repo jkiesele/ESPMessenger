@@ -9,7 +9,7 @@ QueueHandle_t SecurePacketTransceiver::rxQueue_ = nullptr;
 
 SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend,
     const std::vector<uint32_t> * encryptionKeys)
-    : encryptionHandler_(encryptionKeys), backend_(backend), sendBusy_(false) {
+    : encryptionHandler_(encryptionKeys), backend_(backend), sendBusy_(false), channel_(-1) {
     if (backend_ == BackEnd::ESPNow) {
         if (instance_ != nullptr) {
             gLogger->println("[ERROR] Only one SecurePacketTransceiver allowed in ESPNow mode.");
@@ -66,7 +66,13 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
         }
         uint8_t channel;
         wifi_second_chan_t secondary;
-        esp_wifi_get_channel(&channel, &secondary);
+        if(channel_ < 0){
+            // Get the current channel
+            esp_wifi_get_channel(&channel, &secondary);
+        }
+        else{
+            channel = static_cast<uint8_t>(channel_);
+        }
         esp_now_peer_info_t peerInfo = {};
         memcpy(peerInfo.peer_addr, destAddress.data(), 6);
         peerInfo.channel = channel;
