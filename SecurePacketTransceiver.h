@@ -5,6 +5,7 @@
 #include <cstdint>
 #include "EncryptionHandler.h"
 #include <atomic>
+#include <WiFiClient.h>
 
 #include <WiFi.h>
 #include <esp_now.h>
@@ -23,6 +24,11 @@ public:
     SecurePacketTransceiver(BackEnd backend = BackEnd::MOCK, 
         const std::vector<uint32_t> * encryptionKeys=0);
     ~SecurePacketTransceiver();
+
+    void setTcpServer(IPAddress ip, uint16_t port) {
+        serverIp_   = ip;
+        serverPort_ = port;
+      }
 
     void begin();
     bool send(const std::vector<uint8_t>& plainPacket, const std::vector<uint8_t>& destAddress = {});
@@ -50,6 +56,11 @@ private:
 
     std::atomic<bool> sendBusy_;
     int8_t channel_;
+
+
+  WiFiClient     tcpClient_;
+  IPAddress      serverIp_;    // set by user
+  uint16_t       serverPort_;  // set by user
 
 };
 

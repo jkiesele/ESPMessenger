@@ -36,6 +36,9 @@ SecurePacketTransceiver::~SecurePacketTransceiver() {
             rxQueue_ = nullptr;
         }
     }
+    else if (backend_ == BackEnd::TCP) {
+        if (tcpClient_.connected()) tcpClient_.stop();
+      }
 }
 
 void SecurePacketTransceiver::begin() {
@@ -55,6 +58,9 @@ void SecurePacketTransceiver::begin() {
             esp_now_register_send_cb(onEspNowSend);
         }
     }
+    else if (backend_ == BackEnd::TCP) {
+        // nothing to do here: we connect lazily in send()
+      }
 }
 
 bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, const std::vector<uint8_t>& destAddress) {
@@ -90,6 +96,30 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
         esp_err_t result = esp_now_send(destAddress.data(), encrypted.data(), encrypted.size());
         return result == ESP_OK;
     }
+    else if (backend_ == BackEnd::TCP) {
+      // 1) ensure connection
+      if (!tcpClient_.connected()) {
+        if (!tcpClient_.connect(serverIp_, serverPort_)) {
+          gLogger->println("[ERROR] TCP connect failed");
+          return false;
+        }
+      }
+      // 2) frame with 2-byte length prefix (big-endian)
+      uint16_t len = encrypted.size();
+      uint8_t header[2] = { uint8_t(len >> 8), uint8_t(len & 0xFF) };
+      if (tcpClient_.write(header, 2) != 2) {
+        gLogger->println("[ERROR] TCP write header failed");
+        return false;
+      }
+      // 3) send payload
+      if (tcpClient_.write(encrypted.data(), len) != len) {
+        gLogger->println("[ERROR] TCP write body failed");
+        return false;
+      }
+      // 4) we consider it “sent” immediately
+      return true;
+    }
+
     return false;
 }
 
@@ -103,6 +133,25 @@ bool SecurePacketTransceiver::receive(std::vector<uint8_t>& decryptedPacket) {
             return success;
         }
         return false;
+    }
+    else if (backend_ == BackEnd::TCP) {
+      // 1) check if we have at least a 2-byte header
+      if (tcpClient_.connected() && tcpClient_.available() >= 2) {
+        uint8_t header[2];
+        tcpClient_.readBytes(header, 2);
+        uint16_t len = (uint16_t(header[0]) << 8) | header[1];
+
+        // 2) wait for full payload
+        while (tcpClient_.available() < len) {
+          delay(1);
+        }
+        std::vector<uint8_t> buf(len);
+        tcpClient_.readBytes(buf.data(), len);
+
+        // 3) decrypt
+        return encryptionHandler_.decrypt(buf, decryptedPacket);
+      }
+      return false;
     }
     return false;
 }
