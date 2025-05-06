@@ -9,7 +9,7 @@ QueueHandle_t SecurePacketTransceiver::rxQueue_ = nullptr;
 
 SecurePacketTransceiver::SecurePacketTransceiver(BackEnd backend,
     const std::vector<uint32_t> * encryptionKeys)
-    : encryptionHandler_(encryptionKeys), backend_(backend), sendBusy_(false), channel_(-1) {
+    : lastStatus_(Status::OK), encryptionHandler_(encryptionKeys), backend_(backend), sendBusy_(false), channel_(-1), lastChan(-1) {
     if (backend_ == BackEnd::ESPNow) {
         if (instance_ != nullptr) {
             gLogger->println("[ERROR] Only one SecurePacketTransceiver allowed in ESPNow mode.");
@@ -63,13 +63,19 @@ void SecurePacketTransceiver::begin() {
       }
 }
 
-bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, const std::vector<uint8_t>& destAddress) {
+SecurePacketTransceiver::Status SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, const std::vector<uint8_t>& destAddress) {
+    
+    if(sendBusy_) 
+        return Status::BUSY;
+
     std::vector<uint8_t> encrypted = encryptionHandler_.encrypt(plainPacket);
     if (backend_ == BackEnd::ESPNow) {
         if (destAddress.size() != 6) {
             gLogger->println("[ERROR] ESPNow destination address must be 6 bytes.");
-            return false;
+            lastStatus_ = Status::ERROR;
+            return Status::ERROR;
         }
+
         uint8_t channel;
         wifi_second_chan_t secondary;
         if(channel_ < 0){
@@ -82,26 +88,48 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
         esp_now_peer_info_t peerInfo = {};
         memcpy(peerInfo.peer_addr, destAddress.data(), 6);
         peerInfo.channel = channel;
+        bool channelChanged = lastChan != channel;
         peerInfo.ifidx = WIFI_IF_STA;
         peerInfo.encrypt = false;
-        if (!esp_now_is_peer_exist(destAddress.data())) {
+        if (!esp_now_is_peer_exist(destAddress.data()) || channelChanged) {
+            if(esp_now_is_peer_exist(destAddress.data()))//channel changed
+                esp_now_del_peer(destAddress.data());
             auto ret = esp_now_add_peer(&peerInfo);
             if (ret != ESP_OK) {
                 gLogger->print("[ERROR] Failed to add ESPNow peer, error code: ");
                 gLogger->println(ret);
-                return false;
+                lastStatus_ = Status::ERROR;
+                return Status::ERROR;
             }
+            lastChan = channel;
         }
-        sendBusy_ = true;
-        esp_err_t result = esp_now_send(destAddress.data(), encrypted.data(), encrypted.size());
-        return result == ESP_OK;
+        
+        // 3) Store for callback-driven retries
+        pendingDest_    = destAddress;
+        pendingData_    = encrypted;
+        pendingRetries_ = 0;
+      
+        // 4) Fire the first shot
+        esp_err_t result = esp_now_send(pendingDest_.data(),
+                     pendingData_.data(),
+                     pendingData_.size());
+        if (result == ESP_OK){  
+            sendBusy_   = true;
+            lastStatus_ = Status::SENDING;
+            return Status::SENDING;
+        }
+        else{
+            sendBusy_   = false;
+            lastStatus_ = Status::ERROR;
+            return Status::ERROR;
+        }
     }
     else if (backend_ == BackEnd::TCP) {
       // 1) ensure connection
       if (!tcpClient_.connected()) {
         if (!tcpClient_.connect(serverIp_, serverPort_)) {
           gLogger->println("[ERROR] TCP connect failed");
-          return false;
+          return Status::ERROR;
         }
       }
       // 2) frame with 2-byte length prefix (big-endian)
@@ -109,18 +137,18 @@ bool SecurePacketTransceiver::send(const std::vector<uint8_t>& plainPacket, cons
       uint8_t header[2] = { uint8_t(len >> 8), uint8_t(len & 0xFF) };
       if (tcpClient_.write(header, 2) != 2) {
         gLogger->println("[ERROR] TCP write header failed");
-        return false;
+        return Status::ERROR;
       }
       // 3) send payload
       if (tcpClient_.write(encrypted.data(), len) != len) {
         gLogger->println("[ERROR] TCP write body failed");
-        return false;
+        return Status::ERROR;
       }
       // 4) we consider it “sent” immediately
-      return true;
+      return Status::OK;
     }
 
-    return false;
+    return Status::ERROR;
 }
 
 bool SecurePacketTransceiver::receive(std::vector<uint8_t>& decryptedPacket) {
@@ -178,10 +206,38 @@ void SecurePacketTransceiver::handleEspNowRecv(const uint8_t* data, int len) {
 
 void SecurePacketTransceiver::onEspNowSend(const uint8_t* mac, esp_now_send_status_t status) {
     if (instance_) {
-        instance_->handleEspNowSend(status);
+        instance_->handleEspNowSend(mac, status);
     }
 }
 
-void SecurePacketTransceiver::handleEspNowSend(esp_now_send_status_t status) {
+void SecurePacketTransceiver::handleEspNowSend(const uint8_t* mac, esp_now_send_status_t status) {
+  if (!sendBusy_) return;  // no packet pending? ignore
+  if (memcmp(mac, pendingDest_.data(), 6) != 0) return;
+
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    // Got the MAC‐layer ACK — we’re done
     sendBusy_ = false;
+    lastStatus_ = Status::OK;
+    pendingDest_.clear();
+    pendingData_.clear();
+  }
+  else {
+    // No ACK this time
+    if (++pendingRetries_ < maxRetries_) {
+        esp_err_t err = esp_now_send(pendingDest_.data(),
+                   pendingData_.data(),
+                   pendingData_.size());
+        if (err != ESP_OK) {
+          gLogger->print("[ESPNow] retry-send failed code ");
+          gLogger->println(err);
+        }
+    }
+    else {
+       sendBusy_   = false;
+       lastStatus_ = Status::NO_ACK;
+       pendingDest_.clear();
+       pendingData_.clear();
+       gLogger->println("[ESPNow] retry limit reached, dropping packet");
+    }
+  }
 }

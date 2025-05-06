@@ -41,6 +41,10 @@ uint8_t Messenger::getLastSender() const {
 }
 
 bool Messenger::sendRaw(uint8_t target, DataFormats::DataType type, const std::vector<uint8_t>& data) const {
+    if (transceiver_->isSendBusy()) {
+        gLogger->println("[Messenger] send busy, skipping");
+        return false;
+      }
     std::vector<uint8_t> plainPacket;
     // HEADER_SIZE: target, ownAddress, type
     plainPacket.reserve(HEADER_SIZE + data.size());
@@ -69,12 +73,9 @@ bool Messenger::sendRaw(uint8_t target, DataFormats::DataType type, const std::v
             gLogger->println("[Messenger ERROR] Invalid MAC address size");
             return false;
         }
-        // Send the packet to the target address
-        if (!transceiver_->send(plainPacket, macAddress)) {
-            gLogger->println("[Messenger ERROR] Failed to send packet");
-            return false;
-        }
-        return true;
+        auto stat = transceiver_->send(plainPacket, macAddress);
+        return transceiver_->statusNotError(stat);
     } 
-    return transceiver_->send(plainPacket);
+    auto stat = transceiver_->send(plainPacket);
+    return transceiver_->statusNotError(stat);
 }

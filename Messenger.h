@@ -47,6 +47,9 @@ public:
     bool isSendBusy() const {
         return transceiver_->isSendBusy();
     }
+    SecurePacketTransceiver::Status getLastTransceiverStatus() const {
+        return transceiver_->getLastStatus();
+    }
     
     // Receive functions. Their order here means something and should be used like this in code.
 
