@@ -28,6 +28,18 @@ public:
         NO_ACK,
         ERROR
     };
+    static String statusToString(Status s) {
+        switch (s) {
+            case Status::OK:      return "OK";
+            case Status::SENDING: return "SENDING";
+            case Status::BUSY:    return "BUSY";
+            case Status::NO_ACK:  return "NO_ACK";
+            case Status::ERROR:   return "ERROR";
+            default:             return "UNKNOWN";
+        }
+    }
+
+    
 
     bool statusNotError(Status s)const{
         return s == Status::OK || s == Status::SENDING || s == Status::BUSY;
@@ -75,7 +87,7 @@ private:
     std::vector<uint8_t>   pendingDest_;
     std::vector<uint8_t>   pendingData_;
     uint8_t                pendingRetries_   = 0;
-    const uint8_t          maxRetries_       = 4;  
+    const uint8_t          maxRetries_       = 8;  
 
 
   WiFiClient     tcpClient_;
