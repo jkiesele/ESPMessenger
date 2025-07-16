@@ -237,47 +237,49 @@ void TCPMessenger::onClientPoll(ClientCtx* /*ctx*/) {
 
 // ------------------------------------------------------------------
 // Parse framed bytes for server clients
+// Header bytes: type, chanId, encLen
 // ------------------------------------------------------------------
 void TCPMessenger::parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len) {
     while (len--) {
         uint8_t b = *data++;
 
-        if (!ctx->haveHeader) {
-            // expecting type then length
-            if (ctx->rxPos == 0) {
+        if (ctx->headerPos < 3) {
+            // collecting header
+            if (ctx->headerPos == 0) {
                 ctx->rxType = b;
-                ctx->rxPos = 1;
-            } else {
-                ctx->rxLenEnc   = b;
-                ctx->haveHeader = true;
-                ctx->rxPos      = 0;
-
+            } else if (ctx->headerPos == 1) {
+                ctx->rxChan = b;
+            } else { // headerPos == 2 -> encLen
+                ctx->rxLenEnc = b;
                 if (ctx->rxLenEnc > TCPMSG_MAX_PAYLOAD_ENCRYPTED) {
                     // protocol error: close connection
                     ctx->client->close(true);
                     return;
                 }
+                ctx->rxPos = 0;
 
                 // zero-length payload? dispatch immediately
                 if (ctx->rxLenEnc == 0) {
-                    dispatchFrame(ctx->remote, ctx->rxType, nullptr, 0);
-                    ctx->haveHeader = false;
+                    dispatchFrame(ctx->remote, ctx->rxType, ctx->rxChan, nullptr, 0);
+                    ctx->headerPos = 0;
+                    continue;
                 }
             }
+            ctx->headerPos++;
             continue;
         }
 
         // collecting encrypted payload
         ctx->rxBuf[ctx->rxPos++] = b;
         if (ctx->rxPos >= ctx->rxLenEnc) {
-            // full encrypted payload received -> dispatch
             dispatchFrame(ctx->remote,
                           ctx->rxType,
+                          ctx->rxChan,
                           ctx->rxBuf,
                           ctx->rxLenEnc);
 
             // reset for next frame
-            ctx->haveHeader = false;
+            ctx->headerPos = 0;
             ctx->rxPos = 0;
         }
     }
@@ -289,6 +291,7 @@ void TCPMessenger::parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len) {
 // ------------------------------------------------------------------
 void TCPMessenger::dispatchFrame(const TCPMsgRemoteInfo& from,
                                  uint8_t type,
+                                 uint8_t chanId,
                                  const uint8_t* encPayload,
                                  uint8_t encLen)
 {
@@ -296,9 +299,8 @@ void TCPMessenger::dispatchFrame(const TCPMsgRemoteInfo& from,
 
     if (enc_) {
         // zero-length encrypted payload is not valid under current EncryptionHandler;
-        // treat as decode error.
         if (encLen == 0) {
-            if (recvCB_) recvCB_(from, type, nullptr, 0);
+            if (recvCB_) recvCB_(from, type, chanId, nullptr, 0);
             return;
         }
         std::vector<uint8_t> encVec;
@@ -309,7 +311,7 @@ void TCPMessenger::dispatchFrame(const TCPMsgRemoteInfo& from,
         bool ok = enc_->decrypt(encVec, decrypted);
         if (!ok) {
             if (recvCB_) {
-                recvCB_(from, type, nullptr, 0);  // signal decode error
+                recvCB_(from, type, chanId, nullptr, 0);  // signal decode error
             }
             return;
         }
@@ -328,7 +330,7 @@ void TCPMessenger::dispatchFrame(const TCPMsgRemoteInfo& from,
         if (plen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) {
             plen = TCPMSG_MAX_PAYLOAD_ENCRYPTED; // shouldn't happen
         }
-        recvCB_(from, type, ptr, plen);
+        recvCB_(from, type, chanId, ptr, plen);
     }
 }
 
@@ -402,6 +404,7 @@ bool TCPMessenger::resolveHost(const char* host, IPAddress& outIP) {
 // ------------------------------------------------------------------
 TCPMsgResult TCPMessenger::sendToHost(const char* host,
                                       uint16_t port,
+                                      uint8_t chanId,
                                       const Serializable& msg)
 {
     IPAddress ip;
@@ -423,7 +426,7 @@ TCPMsgResult TCPMessenger::sendToHost(const char* host,
     rc = encryptPayload(plain);
     if (rc != TCPMSG_OK) return rc;
 
-    return sendFrame(to, type, plain.data(), (uint8_t)plain.size());
+    return sendFrame(to, type, chanId, plain.data(), (uint8_t)plain.size());
 }
 
 
@@ -432,6 +435,7 @@ TCPMsgResult TCPMessenger::sendToHost(const char* host,
 // ------------------------------------------------------------------
 TCPMsgResult TCPMessenger::sendToIP(const IPAddress& ip,
                                     uint16_t port,
+                                    uint8_t chanId,
                                     const Serializable& msg)
 {
     TCPMsgRemoteInfo to;
@@ -447,7 +451,7 @@ TCPMsgResult TCPMessenger::sendToIP(const IPAddress& ip,
     rc = encryptPayload(plain);
     if (rc != TCPMSG_OK) return rc;
 
-    return sendFrame(to, type, plain.data(), (uint8_t)plain.size());
+    return sendFrame(to, type, chanId, plain.data(), (uint8_t)plain.size());
 }
 
 
@@ -456,6 +460,7 @@ TCPMsgResult TCPMessenger::sendToIP(const IPAddress& ip,
 // ------------------------------------------------------------------
 TCPMsgResult TCPMessenger::sendFrame(const TCPMsgRemoteInfo& to,
                                      uint8_t type,
+                                     uint8_t chanId,
                                      const uint8_t* encPayload,
                                      uint8_t encLen)
 {
@@ -472,17 +477,19 @@ TCPMsgResult TCPMessenger::sendFrame(const TCPMsgRemoteInfo& to,
     }
 
     ctx->client = c;
-    ctx->to = to;
-    ctx->type = type;
+    ctx->to     = to;
+    ctx->type   = type;
+    ctx->chanId = chanId;
     ctx->encLen = encLen;
-    ctx->self = this;
+    ctx->self   = this;
 
     // build frame: header + payload
-    ctx->frame.resize(2 + encLen);
+    ctx->frame.resize(3 + encLen);
     ctx->frame[0] = type;
-    ctx->frame[1] = encLen;
+    ctx->frame[1] = chanId;
+    ctx->frame[2] = encLen;
     if (encLen) {
-        memcpy(&ctx->frame[2], encPayload, encLen);
+        memcpy(&ctx->frame[3], encPayload, encLen);
     }
 
     // attach outbound callbacks
@@ -532,8 +539,8 @@ void TCPMessenger::onOutboundConnect(OutboundCtx* ctx, AsyncClient* c) {
     }
     c->send();   // push to stack
 
-    // For simplicity we treat 'send' as success (no remote ACK wait)
-    notifySendDone(TCPMSG_OK, ctx->to, ctx->type,
+    // For simplicity treat 'send' as success (no remote ACK wait)
+    notifySendDone(TCPMSG_OK, ctx->to, ctx->type, ctx->chanId,
                    ctx->encLen - (enc_ ? EncryptionHandler::CHECKSUM_SIZE : 0));
 
     c->close(true);  // done
@@ -541,7 +548,7 @@ void TCPMessenger::onOutboundConnect(OutboundCtx* ctx, AsyncClient* c) {
 
 void TCPMessenger::onOutboundError(OutboundCtx* ctx, AsyncClient* c, int8_t /*error*/) {
     if (!ctx) return;
-    notifySendDone(TCPMSG_ERR_WRITE, ctx->to, ctx->type, 0);
+    notifySendDone(TCPMSG_ERR_WRITE, ctx->to, ctx->type, ctx->chanId, 0);
     if (c) c->close(true);
 }
 
@@ -561,6 +568,7 @@ void TCPMessenger::onOutboundDisconnect(OutboundCtx* ctx, AsyncClient* c) {
 void TCPMessenger::notifySendDone(TCPMsgResult rc,
                                   const TCPMsgRemoteInfo& to,
                                   uint8_t type,
+                                  uint8_t chanId,
                                   uint8_t encLenMinusMaybe)
 {
     if (sendDoneCB_) {
@@ -568,7 +576,7 @@ void TCPMessenger::notifySendDone(TCPMsgResult rc,
         if (enc_ && encLenMinusMaybe >= EncryptionHandler::CHECKSUM_SIZE) {
             plainLen = encLenMinusMaybe - EncryptionHandler::CHECKSUM_SIZE;
         }
-        sendDoneCB_(rc, to, type, plainLen);
+        sendDoneCB_(rc, to, type, chanId, plainLen);
     }
 }
 
@@ -579,3 +587,32 @@ void TCPMessenger::notifySendDone(TCPMsgResult rc,
 void TCPMessenger::loop() {
     // nothing needed; AsyncTCP runs via LWIP callbacks
 }
+
+
+// ------------------------------------ examples
+
+/*
+TempMsg temp;
+temp.setCelsius(23.4f);
+gMessenger.sendToHost("deviceB.local", 9000, 0, temp);
+
+LogMsg log("Boot complete");
+gMessenger.sendToIP(peerIP, 9000, TCPMSG_ID_BROADCAST, log);
+
+gMessenger.onReceive([](const TCPMsgRemoteInfo& from,
+                        uint8_t type,
+                        uint8_t chan,
+                        const uint8_t* payload,
+                        uint8_t len){
+    if (type == TempMsg::TYPE_ID) {
+        tempSlots[chan].fromBuffer(payload, len);
+        Serial.printf("Temp chan %u from %s = %.2f\n", chan,
+                      from.ip.toString().c_str(), tempSlots[chan].valueC());
+    } else if (type == LogMsg::TYPE_ID && chan == TCPMSG_ID_BROADCAST) {
+        LogMsg log;
+        if (log.fromBuffer(payload,len)) {
+            Serial.printf("LOG from %s: %s\n", from.ip.toString().c_str(), log.text().c_str());
+        }
+    }
+});
+*/

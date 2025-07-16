@@ -11,7 +11,7 @@
 #include <ESPmDNS.h>
 
 #include "Serializable.h"
-#include "EncryptionHandler.h"   
+#include "EncryptionHandler.h"   // your existing encryption + CRC
 
 // ------------------------------------------------------------------
 // Config
@@ -19,6 +19,9 @@
 #ifndef TCPMSG_MAX_PAYLOAD_ENCRYPTED
 #define TCPMSG_MAX_PAYLOAD_ENCRYPTED 255  // constrained by 1-byte length field
 #endif
+
+// Reserved channel IDs
+static constexpr uint8_t TCPMSG_ID_BROADCAST = 0xFF;   // system / log / not tied to sensor slot
 
 // ------------------------------------------------------------------
 // Result codes
@@ -49,6 +52,7 @@ struct TCPMsgRemoteInfo {
 using TCPMsgReceiveCB =
     std::function<void(const TCPMsgRemoteInfo& from,
                        uint8_t type,
+                       uint8_t chanId,
                        const uint8_t* payload,
                        uint8_t len)>;
 
@@ -56,6 +60,7 @@ using TCPMsgSendDoneCB =
     std::function<void(TCPMsgResult rc,
                        const TCPMsgRemoteInfo& to,
                        uint8_t type,
+                       uint8_t chanId,
                        uint8_t len)>;
 
 
@@ -64,7 +69,7 @@ using TCPMsgSendDoneCB =
 //   - One global singleton instance (see _tcpMessengerSingleton).
 //   - AsyncTCP server for inbound.
 //   - One-shot AsyncTCP client connect for outbound sends.
-//   - Wire format: [type:1][encLen:1][encPayload:encLen].
+//   - Wire format: [type:1][chanId:1][encLen:1][encPayload:encLen].
 //   - If EncryptionHandler present: encPayload = plaintext + CRC + XOR.
 //   - If no encryption: encPayload = plaintext.
 // ------------------------------------------------------------------
@@ -89,16 +94,36 @@ public:
     // ------------------------------------------------------------------
     TCPMsgResult sendToIP(const IPAddress& ip,
                           uint16_t port,
+                          uint8_t chanId,
                           const Serializable& msg);
 
     TCPMsgResult sendToHost(const char* host,
                             uint16_t port,
+                            uint8_t chanId,
                             const Serializable& msg);
 
     TCPMsgResult sendToHost(const String& host,
                             uint16_t port,
+                            uint8_t chanId,
                             const Serializable& msg) {
-        return sendToHost(host.c_str(), port, msg);
+        return sendToHost(host.c_str(), port, chanId, msg);
+    }
+
+    // Convenience: default to broadcast/system channel.
+    TCPMsgResult sendToIP(const IPAddress& ip,
+                          uint16_t port,
+                          const Serializable& msg) {
+        return sendToIP(ip, port, TCPMSG_ID_BROADCAST, msg);
+    }
+    TCPMsgResult sendToHost(const char* host,
+                            uint16_t port,
+                            const Serializable& msg) {
+        return sendToHost(host, port, TCPMSG_ID_BROADCAST, msg);
+    }
+    TCPMsgResult sendToHost(const String& host,
+                            uint16_t port,
+                            const Serializable& msg) {
+        return sendToHost(host.c_str(), port, TCPMSG_ID_BROADCAST, msg);
     }
 
     // ------------------------------------------------------------------
@@ -117,14 +142,15 @@ private:
     struct ClientCtx {
         AsyncClient* client;
         TCPMsgRemoteInfo remote;
-        bool haveHeader;
+        uint8_t headerPos;  // 0=type,1=chanId,2=encLen,3=payload
         uint8_t rxType;
+        uint8_t rxChan;
         uint8_t rxLenEnc;
         uint8_t rxPos;
         uint8_t rxBuf[TCPMSG_MAX_PAYLOAD_ENCRYPTED];
 
         ClientCtx(AsyncClient* c)
-        : client(c), haveHeader(false), rxType(0), rxLenEnc(0), rxPos(0) {}
+        : client(c), headerPos(0), rxType(0), rxChan(0), rxLenEnc(0), rxPos(0) {}
     };
 
     // linked list of active clients
@@ -157,6 +183,7 @@ private:
     void parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len);
     void dispatchFrame(const TCPMsgRemoteInfo& from,
                        uint8_t type,
+                       uint8_t chanId,
                        const uint8_t* encPayload,
                        uint8_t encLen);
 
@@ -174,6 +201,7 @@ private:
     // Low-level send using a one-shot AsyncClient
     TCPMsgResult sendFrame(const TCPMsgRemoteInfo& to,
                            uint8_t type,
+                           uint8_t chanId,
                            const uint8_t* encPayload,
                            uint8_t encLen);
 
@@ -182,11 +210,12 @@ private:
         AsyncClient* client;
         TCPMsgRemoteInfo to;
         uint8_t type;
+        uint8_t chanId;
         uint8_t encLen;            // encrypted length
         std::vector<uint8_t> frame; // header + encPayload
         TCPMessenger* self;
 
-        OutboundCtx() : client(nullptr), type(0), encLen(0), self(nullptr) {}
+        OutboundCtx() : client(nullptr), type(0), chanId(0), encLen(0), self(nullptr) {}
     };
 
     static void _onOutboundConnect(void* arg, AsyncClient* c);
@@ -201,6 +230,7 @@ private:
     void notifySendDone(TCPMsgResult rc,
                         const TCPMsgRemoteInfo& to,
                         uint8_t type,
+                        uint8_t chanId,
                         uint8_t plainLen);  // deliver *plaintext* len to user
 
 private:
