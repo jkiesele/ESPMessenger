@@ -31,7 +31,9 @@ public:
     virtual ~Serializable() {}
 
     virtual uint8_t typeId() const = 0;
-    virtual uint8_t payloadSize() const = 0;
+
+    //stay below TCPMessenger::TCPMSG_MAX_PAYLOAD_ENCRYPTED
+    virtual uint16_t payloadSize() const = 0;
 
     virtual void serializeTo(uint8_t* dst) const = 0;
     virtual bool fromBuffer(const uint8_t* src, uint8_t len) = 0;

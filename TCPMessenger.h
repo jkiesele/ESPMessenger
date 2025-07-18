@@ -50,8 +50,7 @@ struct TCPMsgRemoteInfo {
 };
 
 // ------------------------------------------------------------------
-// Callback signatures  (len is *plaintext* length, still uint8_t –
-//                       <256 B messages dominate; enlarge if you wish)
+// Callback signatures  
 // ------------------------------------------------------------------
 using TCPMsgReceiveCB =
     std::function<void(const TCPMsgRemoteInfo& from,

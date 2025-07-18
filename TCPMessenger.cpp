@@ -327,9 +327,9 @@ TCPMsgResult TCPMessenger::buildPlain(const Serializable& msg,
                                       uint8_t& outType)
 {
     outType = msg.typeId();
-    uint8_t plainLen = msg.payloadSize();
+    uint16_t plainLen = msg.payloadSize();
 
-    // Guard: after encryption must still fit in 1-byte length
+    // Guard: after encryption must still fit in 16-bit length
     size_t encMax = plainLen + (enc_ ? EncryptionHandler::CHECKSUM_SIZE : 0);
     if (encMax > TCPMSG_MAX_PAYLOAD_ENCRYPTED) {
         return TCPMSG_ERR_TOO_LARGE;
@@ -410,7 +410,7 @@ TCPMsgResult TCPMessenger::sendToHost(const char* host,
     rc = encryptPayload(plain);
     if (rc != TCPMSG_OK) return rc;
 
-    return sendFrame(to, type, chanId, plain.data(), (uint8_t)plain.size());
+    return sendFrame(to, type, chanId, plain.data(), static_cast<uint16_t>(plain.size()));
 }
 
 
@@ -435,7 +435,7 @@ TCPMsgResult TCPMessenger::sendToIP(const IPAddress& ip,
     rc = encryptPayload(plain);
     if (rc != TCPMSG_OK) return rc;
 
-    return sendFrame(to, type, chanId, plain.data(), (uint8_t)plain.size());
+    return sendFrame(to, type, chanId, plain.data(), static_cast<uint16_t>(plain.size()));
 }
 
 
@@ -566,7 +566,7 @@ gMessenger.onReceive([](const TCPMsgRemoteInfo& from,
                         uint8_t type,
                         uint8_t chan,
                         const uint8_t* payload,
-                        uint8_t len){
+                        uint16_t len){
     if (type == TempMsg::TYPE_ID) {
         tempSlots[chan].fromBuffer(payload, len);
         Serial.printf("Temp chan %u from %s = %.2f\n", chan,
