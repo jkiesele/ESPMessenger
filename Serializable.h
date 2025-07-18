@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <stdint.h>
+#include <PacketIO.h>
 
 /**
  * @brief Base for all small binary messages (<256 B encrypted).
@@ -35,5 +36,6 @@ public:
     virtual void serializeTo(uint8_t* dst) const = 0;
     virtual bool fromBuffer(const uint8_t* src, uint8_t len) = 0;
 };
+
 
 #endif // SERIALIZABLE_H
