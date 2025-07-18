@@ -239,48 +239,45 @@ void TCPMessenger::onClientPoll(ClientCtx* /*ctx*/) {
 // Parse framed bytes for server clients
 // Header bytes: type, chanId, encLen
 // ------------------------------------------------------------------
-void TCPMessenger::parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len) {
+void TCPMessenger::parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len)
+{
     while (len--) {
         uint8_t b = *data++;
 
-        if (ctx->headerPos < 3) {
-            // collecting header
-            if (ctx->headerPos == 0) {
-                ctx->rxType = b;
-            } else if (ctx->headerPos == 1) {
-                ctx->rxChan = b;
-            } else { // headerPos == 2 -> encLen
-                ctx->rxLenEnc = b;
-                if (ctx->rxLenEnc > TCPMSG_MAX_PAYLOAD_ENCRYPTED) {
-                    // protocol error: close connection
-                    ctx->client->close(true);
-                    return;
-                }
-                ctx->rxPos = 0;
-
-                // zero-length payload? dispatch immediately
-                if (ctx->rxLenEnc == 0) {
-                    dispatchFrame(ctx->remote, ctx->rxType, ctx->rxChan, nullptr, 0);
-                    ctx->headerPos = 0;
-                    continue;
-                }
+        // ---- header collection (4 bytes) ----
+        if (ctx->headerPos < 4) {
+            switch (ctx->headerPos) {
+                case 0: ctx->rxType = b; break;
+                case 1: ctx->rxChan = b; break;
+                case 2: ctx->rxLen  = b; break;           // low byte
+                case 3: ctx->rxLen |= static_cast<uint16_t>(b) << 8; break; // hi byte
             }
             ctx->headerPos++;
+
+            if (ctx->headerPos == 4) {                    // header complete
+                if (ctx->rxLen == 0) {                    // empty payload
+                    dispatchFrame(ctx->remote, ctx->rxType, ctx->rxChan, nullptr, 0);
+                    ctx->headerPos = 0;
+                } else if (ctx->rxLen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) {
+                    ctx->client->close(true);             // hard cap violated
+                    return;
+                } else {
+                    ctx->useDyn = (ctx->rxLen > TCPMSG_STATIC_RXBUF);
+                    if (ctx->useDyn) ctx->rxBufDyn.resize(ctx->rxLen);
+                    ctx->rxPos = 0;
+                }
+            }
             continue;
         }
 
-        // collecting encrypted payload
-        ctx->rxBuf[ctx->rxPos++] = b;
-        if (ctx->rxPos >= ctx->rxLenEnc) {
-            dispatchFrame(ctx->remote,
-                          ctx->rxType,
-                          ctx->rxChan,
-                          ctx->rxBuf,
-                          ctx->rxLenEnc);
+        // ---- payload collection ----
+        uint8_t* dest = ctx->useDyn ? ctx->rxBufDyn.data() : ctx->rxBufStatic;
+        dest[ctx->rxPos++] = b;
 
-            // reset for next frame
-            ctx->headerPos = 0;
-            ctx->rxPos = 0;
+        if (ctx->rxPos >= ctx->rxLen) {   // full frame ready
+            dispatchFrame(ctx->remote, ctx->rxType, ctx->rxChan,
+                          dest, ctx->rxLen);
+            ctx->headerPos = 0;           // reset for next frame
         }
     }
 }
@@ -290,47 +287,34 @@ void TCPMessenger::parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len) {
 // Dispatch a received frame (decrypt + user callback)
 // ------------------------------------------------------------------
 void TCPMessenger::dispatchFrame(const TCPMsgRemoteInfo& from,
-                                 uint8_t type,
-                                 uint8_t chanId,
+                                 uint8_t  type,
+                                 uint8_t  chanId,
                                  const uint8_t* encPayload,
-                                 uint8_t encLen)
+                                 uint16_t encLen)          // <-- widened
 {
     std::vector<uint8_t> decrypted;
 
     if (enc_) {
-        // zero-length encrypted payload is not valid under current EncryptionHandler;
-        if (encLen == 0) {
+        if (encLen == 0) {                              // impossible if encrypted
             if (recvCB_) recvCB_(from, type, chanId, nullptr, 0);
             return;
         }
-        std::vector<uint8_t> encVec;
-        encVec.reserve(encLen);
-        if (encPayload && encLen) {
-            encVec.insert(encVec.end(), encPayload, encPayload + encLen);
-        }
-        bool ok = enc_->decrypt(encVec, decrypted);
-        if (!ok) {
-            if (recvCB_) {
-                recvCB_(from, type, chanId, nullptr, 0);  // signal decode error
-            }
+        std::vector<uint8_t> encVec(encPayload, encPayload + encLen);
+        if (!enc_->decrypt(encVec, decrypted)) {
+            if (recvCB_) recvCB_(from, type, chanId, nullptr, 0); // decode error
             return;
         }
     } else {
-        // no encryption; payload is plaintext (can be zero-len)
-        if (encPayload && encLen) {
+        if (encPayload && encLen)
             decrypted.assign(encPayload, encPayload + encLen);
-        } else {
-            decrypted.clear();
-        }
     }
 
     if (recvCB_) {
-        const uint8_t* ptr = decrypted.empty() ? nullptr : decrypted.data();
-        uint8_t plen = static_cast<uint8_t>(decrypted.size());
-        if (plen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) {
-            plen = TCPMSG_MAX_PAYLOAD_ENCRYPTED; // shouldn't happen
-        }
-        recvCB_(from, type, chanId, ptr, plen);
+        const uint8_t* ptr  = decrypted.empty() ? nullptr : decrypted.data();
+        uint16_t plen = static_cast<uint16_t>(decrypted.size());
+        if (plen > TCPMSG_MAX_PAYLOAD_ENCRYPTED)        // sanity clamp
+            plen = TCPMSG_MAX_PAYLOAD_ENCRYPTED;
+        recvCB_(from, type, chanId, ptr, plen);         // <-- 16-bit length delivered
     }
 }
 
@@ -459,45 +443,30 @@ TCPMsgResult TCPMessenger::sendToIP(const IPAddress& ip,
 // Low-level outbound frame send (one-shot AsyncClient)
 // ------------------------------------------------------------------
 TCPMsgResult TCPMessenger::sendFrame(const TCPMsgRemoteInfo& to,
-                                     uint8_t type,
-                                     uint8_t chanId,
+                                     uint8_t type, uint8_t chan,
                                      const uint8_t* encPayload,
-                                     uint8_t encLen)
+                                     uint16_t encLen)
 {
     AsyncClient* c = new AsyncClient();
     if (!c) return TCPMSG_ERR_TRANSPORT;
-
-    // reduce latency
     c->setNoDelay(true);
 
     OutboundCtx* ctx = new OutboundCtx();
-    if (!ctx) {
-        delete c;
-        return TCPMSG_ERR_TRANSPORT;
-    }
+    if (!ctx) { delete c; return TCPMSG_ERR_TRANSPORT; }
+    ctx->client = c; ctx->to = to; ctx->type = type;
+    ctx->chan   = chan; ctx->encLen = encLen; ctx->self = this;
 
-    ctx->client = c;
-    ctx->to     = to;
-    ctx->type   = type;
-    ctx->chanId = chanId;
-    ctx->encLen = encLen;
-    ctx->self   = this;
-
-    // build frame: header + payload
-    ctx->frame.resize(3 + encLen);
+    ctx->frame.resize(4 + encLen);
     ctx->frame[0] = type;
-    ctx->frame[1] = chanId;
-    ctx->frame[2] = encLen;
-    if (encLen) {
-        memcpy(&ctx->frame[3], encPayload, encLen);
-    }
+    ctx->frame[1] = chan;
+    ctx->frame[2] = encLen & 0xFF;
+    ctx->frame[3] = encLen >> 8;
+    if (encLen) memcpy(&ctx->frame[4], encPayload, encLen);
 
-    // attach outbound callbacks
     c->onConnect(&_onOutboundConnect, ctx);
     c->onError(&_onOutboundError, ctx);
     c->onDisconnect(&_onOutboundDisconnect, ctx);
 
-    // attempt connect
     if (!c->connect(to.ip, to.port)) {
         _onOutboundError(ctx, c, -1);
         return TCPMSG_ERR_TRANSPORT;
@@ -530,25 +499,22 @@ void TCPMessenger::_onOutboundDisconnect(void* arg, AsyncClient* c) {
 // ------------------------------------------------------------------
 void TCPMessenger::onOutboundConnect(OutboundCtx* ctx, AsyncClient* c) {
     if (!ctx) return;
-    // write frame (cast to const char* for AsyncClient)
     size_t written = c->write(reinterpret_cast<const char*>(ctx->frame.data()),
                               ctx->frame.size());
     if (written != ctx->frame.size()) {
         onOutboundError(ctx, c, -2);
         return;
     }
-    c->send();   // push to stack
-
-    // For simplicity treat 'send' as success (no remote ACK wait)
-    notifySendDone(TCPMSG_OK, ctx->to, ctx->type, ctx->chanId,
+    c->send();
+    notifySendDone(TCPMSG_OK, ctx->to, ctx->type, ctx->chan,
                    ctx->encLen - (enc_ ? EncryptionHandler::CHECKSUM_SIZE : 0));
-
-    c->close(true);  // done
+    c->close(true);
 }
+
 
 void TCPMessenger::onOutboundError(OutboundCtx* ctx, AsyncClient* c, int8_t /*error*/) {
     if (!ctx) return;
-    notifySendDone(TCPMSG_ERR_WRITE, ctx->to, ctx->type, ctx->chanId, 0);
+    notifySendDone(TCPMSG_ERR_WRITE, ctx->to, ctx->type, ctx->chan, 0);
     if (c) c->close(true);
 }
 
@@ -565,20 +531,17 @@ void TCPMessenger::onOutboundDisconnect(OutboundCtx* ctx, AsyncClient* c) {
 // Notify app about send completion
 // plainLen = encryptedLen minus CRC (if encryption used)
 // ------------------------------------------------------------------
-void TCPMessenger::notifySendDone(TCPMsgResult rc,
-                                  const TCPMsgRemoteInfo& to,
-                                  uint8_t type,
-                                  uint8_t chanId,
-                                  uint8_t encLenMinusMaybe)
+void TCPMessenger::notifySendDone(TCPMsgResult rc, const TCPMsgRemoteInfo& to,
+                                  uint8_t type, uint8_t chanId,
+                                  uint16_t encLenMinusMaybe)
 {
-    if (sendDoneCB_) {
-        uint8_t plainLen = encLenMinusMaybe;
-        if (enc_ && encLenMinusMaybe >= EncryptionHandler::CHECKSUM_SIZE) {
-            plainLen = encLenMinusMaybe - EncryptionHandler::CHECKSUM_SIZE;
-        }
-        sendDoneCB_(rc, to, type, chanId, plainLen);
-    }
+    if (!sendDoneCB_) return;
+    uint16_t plain = encLenMinusMaybe;
+    if (enc_ && encLenMinusMaybe >= EncryptionHandler::CHECKSUM_SIZE)
+        plain = encLenMinusMaybe - EncryptionHandler::CHECKSUM_SIZE;
+    sendDoneCB_(rc, to, type, chanId, plain);
 }
+
 
 
 // ------------------------------------------------------------------
