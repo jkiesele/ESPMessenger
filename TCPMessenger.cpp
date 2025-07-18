@@ -386,10 +386,10 @@ bool TCPMessenger::resolveHost(const char* host, IPAddress& outIP) {
 // ------------------------------------------------------------------
 // Public send: by hostname
 // ------------------------------------------------------------------
-TCPMsgResult TCPMessenger::sendToHost(const char* host,
-                                      uint16_t port,
-                                      uint8_t chanId,
-                                      const Serializable& msg)
+TCPMsgResult TCPMessenger::sendToHost(const Serializable& msg,
+                            uint8_t            chanId,
+                            const char*        host,
+                            uint16_t           port)
 {
     IPAddress ip;
     if (!resolveHost(host, ip)) {
@@ -417,10 +417,10 @@ TCPMsgResult TCPMessenger::sendToHost(const char* host,
 // ------------------------------------------------------------------
 // Public send: by IP
 // ------------------------------------------------------------------
-TCPMsgResult TCPMessenger::sendToIP(const IPAddress& ip,
-                                    uint16_t port,
-                                    uint8_t chanId,
-                                    const Serializable& msg)
+TCPMsgResult TCPMessenger::sendToIP(const Serializable& msg,
+                          uint8_t            chanId,
+                          const IPAddress&   ip,
+                          uint16_t           port)
 {
     TCPMsgRemoteInfo to;
     to.ip = ip;
@@ -557,10 +557,10 @@ void TCPMessenger::loop() {
 /*
 TempMsg temp;
 temp.setCelsius(23.4f);
-gMessenger.sendToHost("deviceB.local", 9000, 0, temp);
+gMessenger.sendToHost(temp, 0, "deviceB.local", 9000);
 
 LogMsg log("Boot complete");
-gMessenger.sendToIP(peerIP, 9000, TCPMSG_ID_BROADCAST, log);
+gMessenger.sendToIP(log, 0, peerIP, 9000);
 
 gMessenger.onReceive([](const TCPMsgRemoteInfo& from,
                         uint8_t type,

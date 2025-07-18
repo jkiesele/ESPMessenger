@@ -20,6 +20,9 @@
 #define TCPMSG_MAX_PAYLOAD_ENCRYPTED  2048u   // 2 kB hard cap
 #endif
 
+//default port
+static constexpr uint16_t TCPMSG_DEFAULT_PORT = 12345; // default port for TCP Messenger
+
 static constexpr uint16_t TCPMSG_STATIC_RXBUF = 255u;   // bytes kept on the stack
 static_assert(TCPMSG_STATIC_RXBUF < TCPMSG_MAX_PAYLOAD_ENCRYPTED,
               "static buffer must be smaller than hard cap");
@@ -77,28 +80,53 @@ public:
     TCPMessenger(const TCPMessenger&)            = delete;
     TCPMessenger& operator=(const TCPMessenger&) = delete;
 
-    bool beginServer(uint16_t port);
+    bool beginServer(uint16_t port = TCPMSG_DEFAULT_PORT);// default port
     void endServer();
     bool serverActive() const { return server_ != nullptr; }
     uint16_t serverPort() const { return serverPort_; }
 
-    // Sends -------------------------------------------------------------------
-    TCPMsgResult sendToIP  (const IPAddress& ip, uint16_t port,
-                            uint8_t chanId, const Serializable& msg);
-    TCPMsgResult sendToHost(const char* host,   uint16_t port,
-                            uint8_t chanId, const Serializable& msg);
-    TCPMsgResult sendToHost(const String& host, uint16_t port,
-                            uint8_t chanId, const Serializable& msg) {
-        return sendToHost(host.c_str(), port, chanId, msg);
+    // --- by IP ------------------------------------------------
+    TCPMsgResult sendToIP(const Serializable& msg,
+                          uint8_t            chanId,
+                          const IPAddress&   ip,
+                          uint16_t           port = TCPMSG_DEFAULT_PORT);
+    
+    // broadcast convenience
+    inline TCPMsgResult sendToIP(const Serializable& msg,
+                                 const IPAddress&   ip,
+                                 uint16_t           port = TCPMSG_DEFAULT_PORT)
+    {
+        return sendToIP(msg, TCPMSG_ID_BROADCAST, ip, port);
     }
-    // legacy convenience (broadcast channel)
-    TCPMsgResult sendToIP  (const IPAddress& ip, uint16_t port,
-                            const Serializable& msg) {
-        return sendToIP(ip, port, TCPMSG_ID_BROADCAST, msg);
+    
+    // --- by host (C-string) -----------------------------------
+    TCPMsgResult sendToHost(const Serializable& msg,
+                            uint8_t            chanId,
+                            const char*        host,
+                            uint16_t           port = TCPMSG_DEFAULT_PORT);
+    
+    // broadcast convenience
+    inline TCPMsgResult sendToHost(const Serializable& msg,
+                                   const char*        host,
+                                   uint16_t           port = TCPMSG_DEFAULT_PORT)
+    {
+        return sendToHost(msg, TCPMSG_ID_BROADCAST, host, port);
     }
-    TCPMsgResult sendToHost(const char* host, uint16_t port,
-                            const Serializable& msg) {
-        return sendToHost(host, port, TCPMSG_ID_BROADCAST, msg);
+    
+    // --- by host (Arduino String) -----------------------------
+    inline TCPMsgResult sendToHost(const Serializable& msg,
+                                   uint8_t            chanId,
+                                   const String&      host,
+                                   uint16_t           port = TCPMSG_DEFAULT_PORT)
+    {
+        return sendToHost(msg, chanId, host.c_str(), port);
+    }
+    
+    inline TCPMsgResult sendToHost(const Serializable& msg,
+                                   const String&      host,
+                                   uint16_t           port = TCPMSG_DEFAULT_PORT)
+    {
+        return sendToHost(msg, TCPMSG_ID_BROADCAST, host.c_str(), port);
     }
 
     void onReceive (TCPMsgReceiveCB cb) { recvCB_  = cb; }
