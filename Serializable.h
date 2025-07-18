@@ -36,8 +36,7 @@ public:
     virtual uint16_t payloadSize() const = 0;
 
     virtual void serializeTo(uint8_t* dst) const = 0;
-    virtual bool fromBuffer(const uint8_t* src, uint8_t len) = 0;
+    virtual bool fromBuffer(const uint8_t* src, uint16_t len) = 0;
 };
-
 
 #endif // SERIALIZABLE_H
