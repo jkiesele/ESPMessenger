@@ -11,7 +11,7 @@ namespace SharedDataFormats {
 // ------------------------------------------------------------------
 class ReservoirInfo : public Serializable {
 public:
-    ReservoirInfo() : level_(0), capacity_(0), temperature_(0) {}
+    ReservoirInfo() : level_(0), emptyLevel_(0), capacity_(0), temperature_(0) {}
 
     // --- Serializable interface ------------------------------------
     static constexpr uint8_t TYPE_ID = 0x01;
@@ -20,6 +20,7 @@ public:
     void serializeTo(uint8_t* dst) const override {
         PacketWriter w(dst, payloadSize());
         w.write(level_);
+        w.write(emptyLevel_);
         w.write(capacity_);
         w.write(temperature_);
         // w.ok() is guaranteed because we pre-sized the buffer.
@@ -29,6 +30,7 @@ public:
         if (len < payloadSize()) return false;                  // length guard
         PacketReader r(src, len);
         return r.read(level_)     &&
+               r.read(emptyLevel_) &&
                r.read(capacity_)  &&
                r.read(temperature_) &&
                r.atEnd();                                      // exact fit
@@ -38,17 +40,27 @@ public:
     float level()       const { return level_; }
     void  setLevel(float v) { level_ = v; }
 
+    float emptyLevel()  const { return emptyLevel_; }
+    void  setEmptyLevel(float v) { emptyLevel_ = v; }
+
     float capacity()    const { return capacity_; }
     void  setCapacity(float v) { capacity_ = v; }
 
     float temperature() const { return temperature_; }
     void  setTemperature(float v) { temperature_ = v; }
 
+    float litersFullMin() const {
+        return capacity_ * (level_ / 100.0f);
+    }
+    float litersEmptyMin() const {
+        return capacity_ * (emptyLevel_ / 100.0f);
+    }
 
-    uint16_t payloadSize() const override { return 12; }        // 3 × float32
+    uint16_t payloadSize() const override { return 16; }        // 4 × float32
 
 protected: //protected so that we can use it in derived classes
     float level_;        // e.g. 0-100 %
+    float emptyLevel_;   // e.g. 0-100 %
     float capacity_;     // litres
     float temperature_;  // °C
 };
