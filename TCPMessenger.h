@@ -54,11 +54,6 @@ struct TCPMsgRemoteInfo {
     String    host;   // may be empty
 };
 
-struct PendingSend {
-    std::vector<uint8_t> frame;   // header(4) + encrypted payload
-    TCPMsgRemoteInfo     to;      // ip/host/port (host may still need DNS)
-    bool                 needResolve;
-};
 
 // ------------------------------------------------------------------
 // Callback signatures  
@@ -82,6 +77,13 @@ using TCPMsgSendDoneCB =
 // ------------------------------------------------------------------
 class TCPMessenger {
 public:
+
+    struct PendingSend {
+        std::vector<uint8_t> frame;   // header(4) + encrypted payload
+        TCPMsgRemoteInfo     to;      // ip/host/port (host may still need DNS)
+        bool                 needResolve=false;
+    };
+
     explicit TCPMessenger(EncryptionHandler* enc = nullptr);
     ~TCPMessenger();
 
@@ -93,49 +95,23 @@ public:
     bool serverActive() const { return server_ != nullptr; }
     uint16_t serverPort() const { return serverPort_; }
 
-    // --- by IP ------------------------------------------------
-    TCPMsgResult sendToIP(const Serializable& msg,
-                          uint8_t            chanId,
-                          const IPAddress&   ip,
-                          uint16_t           port = TCPMSG_DEFAULT_PORT);
-    
-    // broadcast convenience
-    inline TCPMsgResult sendToIP(const Serializable& msg,
-                                 const IPAddress&   ip,
-                                 uint16_t           port = TCPMSG_DEFAULT_PORT)
+
+    TCPMsgResult sendToHost(const Serializable& m,
+                        uint8_t chan,
+                        const char* host,
+                        uint16_t port = TCPMSG_DEFAULT_PORT)
     {
-        return sendToIP(msg, TCPMSG_ID_BROADCAST, ip, port);
+        return sendTo(m, chan, host, IPAddress(), port, /*needResolve=*/true);
     }
     
-    // --- by host (C-string) -----------------------------------
-    TCPMsgResult sendToHost(const Serializable& msg,
-                            uint8_t            chanId,
-                            const char*        host,
-                            uint16_t           port = TCPMSG_DEFAULT_PORT);
-    
-    // broadcast convenience
-    inline TCPMsgResult sendToHost(const Serializable& msg,
-                                   const char*        host,
-                                   uint16_t           port = TCPMSG_DEFAULT_PORT)
+    TCPMsgResult sendToIP(const Serializable& m,
+                          uint8_t chan,
+                          const IPAddress& ip,
+                          uint16_t port = TCPMSG_DEFAULT_PORT)
     {
-        return sendToHost(msg, TCPMSG_ID_BROADCAST, host, port);
+        return sendTo(m, chan, /*hostStr=*/nullptr, ip, port, /*needResolve=*/false);
     }
-    
-    // --- by host (Arduino String) -----------------------------
-    inline TCPMsgResult sendToHost(const Serializable& msg,
-                                   uint8_t            chanId,
-                                   const String&      host,
-                                   uint16_t           port = TCPMSG_DEFAULT_PORT)
-    {
-        return sendToHost(msg, chanId, host.c_str(), port);
-    }
-    
-    inline TCPMsgResult sendToHost(const Serializable& msg,
-                                   const String&      host,
-                                   uint16_t           port = TCPMSG_DEFAULT_PORT)
-    {
-        return sendToHost(msg, TCPMSG_ID_BROADCAST, host.c_str(), port);
-    }
+
 
     void onReceive (TCPMsgReceiveCB cb) { recvCB_  = cb; }
     void onSendDone(TCPMsgSendDoneCB cb) { sendDoneCB_ = cb; }
@@ -224,6 +200,20 @@ private:
 
 private:
 
+    /*  private
+     *  ------------------------------------------------------------------
+     *  hostStr  – may be nullptr/empty when you already have an IP
+     *  ip       – ignored when needResolve==true
+     *  needResolve – true  ➞ resolve hostStr first
+     *                 false ➞ use ip directly
+     */
+    TCPMsgResult sendTo(const Serializable& msg,
+                        uint8_t             chan,
+                        const char*         hostStr,
+                        const IPAddress&    ip,
+                        uint16_t            port,
+                        bool                needResolve);
+
     void            clearPending();           // resets slot + busy flag
     static void     _sendWorkerThunk(void*);  // FreeRTOS task entry
     void            sendWorkerLoop();         // actual loop body
@@ -240,6 +230,7 @@ private:
     TaskHandle_t      sendWorker_;
     bool              sendBusy_;
     PendingSend       pending_;
+    bool              taskRunning_;
 };
 
 extern TCPMessenger* _tcpMessengerSingleton;

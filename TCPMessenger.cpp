@@ -1,6 +1,9 @@
 #include "TCPMessenger.h"
 #include <cstring>        // memcpy
-#include <LoggingBase.h>  // optional; provides gLogger?
+#include <LoggingBase.h>  // provides gLogger
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 
 // ------------------------------------------------------------------
 // Optional logging macro (compiles away if gLogger not defined).
@@ -45,6 +48,7 @@ TCPMessenger::TCPMessenger(EncryptionHandler* enc)
             1,                       // low prio
             &sendWorker_,
             1);                      // APP CPU
+    taskRunning_ = true;
 }
 
 
@@ -53,6 +57,11 @@ TCPMessenger::~TCPMessenger() {
     if (_tcpMessengerSingleton == this) {
         _tcpMessengerSingleton = nullptr;
     }
+    taskRunning_ = false;
+    xTaskNotifyGive(sendWorker_);   // wake so it can exit
+    vTaskDelay(1);                  // yield to let it clean up (tiny)
+    vSemaphoreDelete(sendMtx_);
+
 }
 
 
@@ -396,19 +405,19 @@ bool TCPMessenger::resolveHost(const char* host, IPAddress& outIP) {
 
 
 // ------------------------------------------------------------------
-// Public send: by hostname
+// private send: by hostname or IP
 // ------------------------------------------------------------------
-TCPMsgResult TCPMessenger::sendToHost(const Serializable& msg,
-                                      uint8_t             chan,
-                                      const char*         host,
-                                      uint16_t            port)
+TCPMsgResult TCPMessenger::sendTo(const Serializable& msg,
+                                          uint8_t             chan,
+                                          const char*         hostStr,
+                                          const IPAddress&    ip,
+                                          uint16_t            port,
+                                          bool                needResolve)
 {
-    if (!host || !*host) return TCPMSG_ERR_RESOLVE;
-
-    /* ---- build + encrypt (fast) ----------------------------------- */
+    /* ---------- fast local work: build + encrypt ------------------- */
     std::vector<uint8_t> plain;
     uint8_t type = 0;
-    auto rc = buildPlain(msg, plain, type);
+    TCPMsgResult rc = buildPlain(msg, plain, type);
     if (rc != TCPMSG_OK) return rc;
     rc = encryptPayload(plain);
     if (rc != TCPMSG_OK) return rc;
@@ -421,18 +430,26 @@ TCPMsgResult TCPMessenger::sendToHost(const Serializable& msg,
     frame[3] = encLen >> 8;
     memcpy(&frame[4], plain.data(), encLen);
 
-    /* ---- occupy pending slot -------------------------------------- */
-    if (xSemaphoreTake(sendMtx_, 0) == pdFALSE) return TCPMSG_ERR_BUSY;
+    /* ---------- occupy single pending slot ------------------------- */
+    if (xSemaphoreTake(sendMtx_, 0) == pdFALSE)          return TCPMSG_ERR_BUSY;
     if (sendBusy_) { xSemaphoreGive(sendMtx_); return TCPMSG_ERR_BUSY; }
 
-    pending_.frame        = std::move(frame);
-    pending_.to.host      = host;
-    pending_.to.port      = port;
-    pending_.needResolve  = true;
-    sendBusy_             = true;
+    pending_.frame       = std::move(frame);
+    pending_.to.port     = port;
+    pending_.needResolve = needResolve;
+
+    if (needResolve) {
+        pending_.to.host = hostStr ? String(hostStr) : String();
+        pending_.to.ip   = IPAddress();          // will be filled by worker
+    } else {
+        pending_.to.host = "";
+        pending_.to.ip   = ip;
+    }
+
+    sendBusy_ = true;
     xSemaphoreGive(sendMtx_);
 
-    xTaskNotifyGive(sendWorker_);      // wake worker
+    xTaskNotifyGive(sendWorker_);                // wake worker
     return TCPMSG_QUEUED;
 }
 
@@ -446,6 +463,7 @@ void TCPMessenger::sendWorkerLoop()
     for (;;)
     {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   // wait work
+        if (!taskRunning_) vTaskDelete(nullptr); // exit if task not running
 
         PendingSend job;
         {
@@ -488,30 +506,6 @@ void TCPMessenger::clearPending()
     xSemaphoreGive(sendMtx_);
 }
 
-
-// ------------------------------------------------------------------
-// Public send: by IP
-// ------------------------------------------------------------------
-TCPMsgResult TCPMessenger::sendToIP(const Serializable& msg,
-                          uint8_t            chanId,
-                          const IPAddress&   ip,
-                          uint16_t           port)
-{
-    TCPMsgRemoteInfo to;
-    to.ip = ip;
-    to.port = port;
-    to.host = ""; // unknown
-
-    std::vector<uint8_t> plain;
-    uint8_t type = 0;
-    TCPMsgResult rc = buildPlain(msg, plain, type);
-    if (rc != TCPMSG_OK) return rc;
-
-    rc = encryptPayload(plain);
-    if (rc != TCPMSG_OK) return rc;
-
-    return sendFrame(to, type, chanId, plain.data(), static_cast<uint16_t>(plain.size()));
-}
 
 
 // ------------------------------------------------------------------
@@ -601,6 +595,7 @@ void TCPMessenger::onOutboundDisconnect(OutboundCtx* ctx, AsyncClient* c) {
         delete ctx->client;
         delete ctx;
     }
+    clearPending(); 
 }
 
 
