@@ -33,6 +33,18 @@ TCPMessenger::TCPMessenger(EncryptionHandler* enc)
         return;
     }
     _tcpMessengerSingleton = this;
+
+    sendMtx_     = xSemaphoreCreateMutex();
+    sendBusy_    = false;
+    
+    xTaskCreatePinnedToCore(
+            _sendWorkerThunk,        // entry
+            "TCPMsgW",
+            4096,
+            this,
+            1,                       // low prio
+            &sendWorker_,
+            1);                      // APP CPU
 }
 
 
@@ -387,30 +399,93 @@ bool TCPMessenger::resolveHost(const char* host, IPAddress& outIP) {
 // Public send: by hostname
 // ------------------------------------------------------------------
 TCPMsgResult TCPMessenger::sendToHost(const Serializable& msg,
-                            uint8_t            chanId,
-                            const char*        host,
-                            uint16_t           port)
+                                      uint8_t             chan,
+                                      const char*         host,
+                                      uint16_t            port)
 {
-    IPAddress ip;
-    if (!resolveHost(host, ip)) {
-        return TCPMSG_ERR_RESOLVE;
-    }
+    if (!host || !*host) return TCPMSG_ERR_RESOLVE;
 
-    TCPMsgRemoteInfo to;
-    to.ip = ip;
-    to.port = port;
-    to.host = host ? String(host) : String();
-
-    // build plaintext & send
+    /* ---- build + encrypt (fast) ----------------------------------- */
     std::vector<uint8_t> plain;
     uint8_t type = 0;
-    TCPMsgResult rc = buildPlain(msg, plain, type);
+    auto rc = buildPlain(msg, plain, type);
     if (rc != TCPMSG_OK) return rc;
-
     rc = encryptPayload(plain);
     if (rc != TCPMSG_OK) return rc;
 
-    return sendFrame(to, type, chanId, plain.data(), static_cast<uint16_t>(plain.size()));
+    const uint16_t encLen = static_cast<uint16_t>(plain.size());
+    std::vector<uint8_t> frame(4 + encLen);
+    frame[0] = type;
+    frame[1] = chan;
+    frame[2] = encLen & 0xFF;
+    frame[3] = encLen >> 8;
+    memcpy(&frame[4], plain.data(), encLen);
+
+    /* ---- occupy pending slot -------------------------------------- */
+    if (xSemaphoreTake(sendMtx_, 0) == pdFALSE) return TCPMSG_ERR_BUSY;
+    if (sendBusy_) { xSemaphoreGive(sendMtx_); return TCPMSG_ERR_BUSY; }
+
+    pending_.frame        = std::move(frame);
+    pending_.to.host      = host;
+    pending_.to.port      = port;
+    pending_.needResolve  = true;
+    sendBusy_             = true;
+    xSemaphoreGive(sendMtx_);
+
+    xTaskNotifyGive(sendWorker_);      // wake worker
+    return TCPMSG_QUEUED;
+}
+
+void TCPMessenger::_sendWorkerThunk(void* arg)
+{
+    static_cast<TCPMessenger*>(arg)->sendWorkerLoop();
+}
+
+void TCPMessenger::sendWorkerLoop()
+{
+    for (;;)
+    {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   // wait work
+
+        PendingSend job;
+        {
+            xSemaphoreTake(sendMtx_, portMAX_DELAY);
+            if (!sendBusy_) { xSemaphoreGive(sendMtx_); continue; }
+            job = pending_;        // copy
+            xSemaphoreGive(sendMtx_);
+        }
+
+        /* ---- resolve if needed ------------------------------------ */
+        if (job.needResolve) {
+            if (!resolveHost(job.to.host.c_str(), job.to.ip)) {
+                notifySendDone(TCPMSG_ERR_RESOLVE, job.to,
+                               job.frame[0], job.frame[1], 0);
+                clearPending();
+                continue;
+            }
+        }
+
+        /* ---- hand off to async TCP -------------------------------- */
+        auto rc = sendFrame(job.to,
+                            job.frame[0],           // type
+                            job.frame[1],           // chan
+                            &job.frame[4],
+                            static_cast<uint16_t>(job.frame.size()-4));
+
+        if (rc != TCPMSG_OK) {
+            notifySendDone(rc, job.to, job.frame[0], job.frame[1], 0);
+            clearPending();
+        }
+        /* success path: onOutbound* callback will clearPending() */
+    }
+}
+
+void TCPMessenger::clearPending()
+{
+    xSemaphoreTake(sendMtx_, portMAX_DELAY);
+    sendBusy_ = false;
+    pending_  = PendingSend{};   // reset
+    xSemaphoreGive(sendMtx_);
 }
 
 
@@ -509,6 +584,7 @@ void TCPMessenger::onOutboundConnect(OutboundCtx* ctx, AsyncClient* c) {
     notifySendDone(TCPMSG_OK, ctx->to, ctx->type, ctx->chan,
                    ctx->encLen - (enc_ ? EncryptionHandler::CHECKSUM_SIZE : 0));
     c->close(true);
+    clearPending();
 }
 
 
@@ -516,6 +592,7 @@ void TCPMessenger::onOutboundError(OutboundCtx* ctx, AsyncClient* c, int8_t /*er
     if (!ctx) return;
     notifySendDone(TCPMSG_ERR_WRITE, ctx->to, ctx->type, ctx->chan, 0);
     if (c) c->close(true);
+    clearPending();
 }
 
 void TCPMessenger::onOutboundDisconnect(OutboundCtx* ctx, AsyncClient* c) {

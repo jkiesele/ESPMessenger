@@ -41,6 +41,8 @@ enum TCPMsgResult : uint8_t {
     TCPMSG_ERR_WRITE,
     TCPMSG_ERR_TRANSPORT,
     TCPMSG_ERR_DECODE,
+    TCPMSG_QUEUED,  // queued for sending
+    TCPMSG_ERR_BUSY, // busy with another send
 };
 
 // ------------------------------------------------------------------
@@ -50,6 +52,12 @@ struct TCPMsgRemoteInfo {
     IPAddress ip;
     uint16_t  port;
     String    host;   // may be empty
+};
+
+struct PendingSend {
+    std::vector<uint8_t> frame;   // header(4) + encrypted payload
+    TCPMsgRemoteInfo     to;      // ip/host/port (host may still need DNS)
+    bool                 needResolve;
 };
 
 // ------------------------------------------------------------------
@@ -215,6 +223,11 @@ private:
                         uint8_t type, uint8_t chan, uint16_t plainLen);
 
 private:
+
+    void            clearPending();           // resets slot + busy flag
+    static void     _sendWorkerThunk(void*);  // FreeRTOS task entry
+    void            sendWorkerLoop();         // actual loop body
+
     EncryptionHandler* enc_;
     AsyncServer*       server_;
     uint16_t           serverPort_;
@@ -222,6 +235,11 @@ private:
 
     TCPMsgReceiveCB  recvCB_;
     TCPMsgSendDoneCB sendDoneCB_;
+
+    SemaphoreHandle_t sendMtx_;
+    TaskHandle_t      sendWorker_;
+    bool              sendBusy_;
+    PendingSend       pending_;
 };
 
 extern TCPMessenger* _tcpMessengerSingleton;
