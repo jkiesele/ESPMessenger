@@ -103,6 +103,14 @@ public:
     {
         return sendTo(m, chan, host, IPAddress(), port, /*needResolve=*/true);
     }
+    //overwrite for Arduino string
+    TCPMsgResult sendToHost(const Serializable& m,
+                        uint8_t chan,
+                        const String& host,
+                        uint16_t port = TCPMSG_DEFAULT_PORT)
+    {
+        return sendToHost(m, chan, host.c_str(), port);
+    }
     
     TCPMsgResult sendToIP(const Serializable& m,
                           uint8_t chan,
