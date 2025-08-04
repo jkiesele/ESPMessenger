@@ -1,6 +1,11 @@
 #ifndef TCP_MESSENGER_H
 #define TCP_MESSENGER_H
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+
 #include <Arduino.h>
 #include <stdint.h>
 #include <functional>
@@ -239,6 +244,25 @@ private:
     bool              sendBusy_;
     PendingSend       pending_;
     bool              taskRunning_;
+
+    //for better callbacks
+
+    // --- receive worker plumbing ---
+    struct RecvItem {
+        TCPMsgRemoteInfo from;
+        uint8_t  type;
+        uint8_t  chan;
+        uint16_t len;     // encrypted or plain bytes in data
+        uint8_t* data;    // pvPortMalloc'd buffer of length 'len' (or nullptr if len==0)
+        bool     isEncrypted; // true if 'data' is encrypted and needs decrypt in worker
+    };
+    
+    static constexpr UBaseType_t TCPMSG_RX_QUEUE_DEPTH = 16;  // tune
+    QueueHandle_t   rxQueue_   = nullptr;
+    TaskHandle_t    rxWorker_  = nullptr;
+    
+    static void     _rxWorkerThunk(void*);
+    void            rxWorkerLoop();
 };
 
 extern TCPMessenger* _tcpMessengerSingleton;

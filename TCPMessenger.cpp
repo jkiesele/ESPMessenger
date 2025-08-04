@@ -1,9 +1,7 @@
 #include "TCPMessenger.h"
 #include <cstring>        // memcpy
 #include <LoggingBase.h>  // provides gLogger
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/semphr.h>
+
 
 // ------------------------------------------------------------------
 // Optional logging macro (compiles away if gLogger not defined).
@@ -49,6 +47,14 @@ TCPMessenger::TCPMessenger(EncryptionHandler* enc)
             &sendWorker_,
             1);                      // APP CPU
     taskRunning_ = true;
+
+    rxQueue_ = xQueueCreate(TCPMSG_RX_QUEUE_DEPTH, sizeof(RecvItem*));
+    if (!rxQueue_) {
+        TCPMSG_LOG("TCPMessenger: RX queue create failed");
+    } else {
+        xTaskCreatePinnedToCore(_rxWorkerThunk, "TCPMsgRX",
+                                4096, this, 1, &rxWorker_, tskNO_AFFINITY);
+    }
 }
 
 
@@ -57,10 +63,29 @@ TCPMessenger::~TCPMessenger() {
     if (_tcpMessengerSingleton == this) {
         _tcpMessengerSingleton = nullptr;
     }
+    // stop RX worker
+    if (rxWorker_) {
+        RecvItem* poison = nullptr;
+        xQueueSendToBack(rxQueue_, &poison, 0);   // wake + stop
+        vTaskDelay(10);                             // yield to let it exit
+        rxWorker_ = nullptr;                       // (worker self-deletes)
+    }
+    if (rxQueue_) {
+        // drain leftovers defensively
+        RecvItem* it = nullptr;
+        while (xQueueReceive(rxQueue_, &it, 0) == pdTRUE) {
+            if (it) { if (it->data) vPortFree(it->data); delete it; }
+        }
+        vQueueDelete(rxQueue_);
+        rxQueue_ = nullptr;
+    }
+
     taskRunning_ = false;
     xTaskNotifyGive(sendWorker_);   // wake so it can exit
     vTaskDelay(1);                  // yield to let it clean up (tiny)
     vSemaphoreDelete(sendMtx_);
+
+    
 
 }
 
@@ -313,30 +338,36 @@ void TCPMessenger::dispatchFrame(const TCPMsgRemoteInfo& from,
                                  const uint8_t* encPayload,
                                  uint16_t encLen)          // <-- widened
 {
-    std::vector<uint8_t> decrypted;
+    // Allocate item
+    RecvItem* it = new RecvItem();
+    if (!it) return; // drop if OOM
+    it->from        = from;
+    it->type        = type;
+    it->chan        = chanId;
+    it->len         = encLen;
+    it->isEncrypted = (enc_ != nullptr);
+    it->data        = nullptr;
 
-    if (enc_) {
-        if (encLen == 0) {                              // impossible if encrypted
-            if (recvCB_) recvCB_(from, type, chanId, nullptr, 0);
-            return;
-        }
-        std::vector<uint8_t> encVec(encPayload, encPayload + encLen);
-        if (!enc_->decrypt(encVec, decrypted)) {
-            if (recvCB_) recvCB_(from, type, chanId, nullptr, 0); // decode error
-            return;
-        }
-    } else {
-        if (encPayload && encLen)
-            decrypted.assign(encPayload, encPayload + encLen);
+    if (encLen) {
+        it->data = static_cast<uint8_t*>(pvPortMalloc(encLen));
+        if (!it->data) { delete it; return; }  // drop if OOM
+        memcpy(it->data, encPayload, encLen);
     }
 
-    if (recvCB_) {
-        const uint8_t* ptr  = decrypted.empty() ? nullptr : decrypted.data();
-        uint16_t plen = static_cast<uint16_t>(decrypted.size());
-        if (plen > TCPMSG_MAX_PAYLOAD_ENCRYPTED)        // sanity clamp
-            plen = TCPMSG_MAX_PAYLOAD_ENCRYPTED;
-        recvCB_(from, type, chanId, ptr, plen);         // <-- 16-bit length delivered
+    if (!rxQueue_ || xQueueSendToBack(rxQueue_, &it, 0) != pdTRUE) {
+    RecvItem* old = nullptr;
+    if (rxQueue_ && xQueueReceive(rxQueue_, &old, 0) == pdTRUE) {
+        // free the oldest
+        if (old) { if (old->data) vPortFree(old->data); delete old; }
+        // retry enqueue once
+        if (xQueueSendToBack(rxQueue_, &it, 0) == pdTRUE) {
+            return; // success after evicting oldest
+        }
     }
+    // still full or no queue: drop newest
+    if (it->data) vPortFree(it->data);
+    delete it;
+}
 }
 
 
@@ -621,6 +652,53 @@ void TCPMessenger::notifySendDone(TCPMsgResult rc, const TCPMsgRemoteInfo& to,
 // ------------------------------------------------------------------
 void TCPMessenger::loop() {
     // nothing needed; AsyncTCP runs via LWIP callbacks
+}
+
+void TCPMessenger::_rxWorkerThunk(void* arg) {
+    static_cast<TCPMessenger*>(arg)->rxWorkerLoop();
+}
+
+void TCPMessenger::rxWorkerLoop() {
+    for (;;) {
+
+        RecvItem* it = nullptr;
+        if (xQueueReceive(rxQueue_, &it, portMAX_DELAY) != pdTRUE) continue;
+        if (it == nullptr) break;                 // graceful stop
+        
+        const uint8_t* cbPtr = nullptr;
+        uint16_t       cbLen = 0;
+        std::vector<uint8_t> decrypted; // local, freed on scope exit
+
+        if (it->isEncrypted) {
+            if (it->len) {
+                std::vector<uint8_t> encVec(it->data, it->data + it->len);
+                if (enc_ && enc_->decrypt(encVec, decrypted)) {
+                    cbPtr = decrypted.data();
+                    cbLen = static_cast<uint16_t>(decrypted.size());
+                } else {
+                    // decode error -> deliver empty payload per current behavior
+                    cbPtr = nullptr;
+                    cbLen = 0;
+                }
+            } else {
+                cbPtr = nullptr; cbLen = 0;
+            }
+        } else {
+            cbPtr = it->data;
+            cbLen = it->len;
+        }
+
+        // Invoke user callback in app context
+        if (recvCB_) {
+            // Clamp to cap (defensive)
+            if (cbLen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) cbLen = TCPMSG_MAX_PAYLOAD_ENCRYPTED;
+            recvCB_(it->from, it->type, it->chan, cbPtr, cbLen);
+        }
+
+        if (it->data) vPortFree(it->data);
+        delete it;
+    }
+    vTaskDelete(nullptr);
 }
 
 
