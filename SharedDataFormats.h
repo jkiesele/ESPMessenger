@@ -37,12 +37,14 @@ public:
     }
 
     // --- Accessors --------------------------------------------------
+    //level is in percent, 0-100
     float level()       const { return level_; }
     void  setLevel(float v) { level_ = v; }
 
     float emptyLevel()  const { return emptyLevel_; }
     void  setEmptyLevel(float v) { emptyLevel_ = v; }
 
+    //capacity is in liters
     float capacity()    const { return capacity_; }
     void  setCapacity(float v) { capacity_ = v; }
 
