@@ -17,7 +17,7 @@
 
 #include "Serializable.h"
 #include "EncryptionHandler.h"
-
+#include "MDNSSniffer.h"
 // ------------------------------------------------------------------
 // PAYLOAD SIZE CAP  (adjust here – affects all peers)
 // ------------------------------------------------------------------
@@ -91,6 +91,10 @@ public:
 
     explicit TCPMessenger(EncryptionHandler* enc = nullptr);
     ~TCPMessenger();
+
+    void begin(){
+        mdnsSniffer_.begin();
+    }
 
     TCPMessenger(const TCPMessenger&)            = delete;
     TCPMessenger& operator=(const TCPMessenger&) = delete;
@@ -263,6 +267,8 @@ private:
     
     static void     _rxWorkerThunk(void*);
     void            rxWorkerLoop();
+
+    MDNSSniffer mdnsSniffer_;
 };
 
 extern TCPMessenger* _tcpMessengerSingleton;

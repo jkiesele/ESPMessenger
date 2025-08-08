@@ -2,6 +2,8 @@
 #include <cstring>        // memcpy
 #include <LoggingBase.h>  // provides gLogger
 
+#include <lwip/sockets.h>   // <- add once, e.g. at top of file
+#include <lwip/netdb.h>
 
 // ------------------------------------------------------------------
 // Optional logging macro (compiles away if gLogger not defined).
@@ -692,6 +694,11 @@ void TCPMessenger::rxWorkerLoop() {
         if (recvCB_) {
             // Clamp to cap (defensive)
             if (cbLen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) cbLen = TCPMSG_MAX_PAYLOAD_ENCRYPTED;
+            if (it->from.host.isEmpty()) {
+                String host;
+                if (mdnsSniffer_.resolve(it->from.ip, host))
+                    it->from.host = host;               // success
+            }
             recvCB_(it->from, it->type, it->chan, cbPtr, cbLen);
         }
 
