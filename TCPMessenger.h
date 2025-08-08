@@ -94,6 +94,7 @@ public:
 
     void begin(){
         mdnsSniffer_.begin();
+        beginServer(TCPMSG_DEFAULT_PORT);
     }
 
     TCPMessenger(const TCPMessenger&)            = delete;

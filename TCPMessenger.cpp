@@ -698,6 +698,9 @@ void TCPMessenger::rxWorkerLoop() {
                 String host;
                 if (mdnsSniffer_.resolve(it->from.ip, host))
                     it->from.host = host;               // success
+                //else
+                    //gLogger->println("TCPMessenger: RX host resolve failed for " +
+                    //                 it->from.ip.toString());
             }
             recvCB_(it->from, it->type, it->chan, cbPtr, cbLen);
         }
