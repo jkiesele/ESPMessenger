@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <functional>
 #include <vector>
+#include <array>
 
 #include <WiFi.h>
 #include <AsyncTCP.h>
@@ -33,6 +34,14 @@ static_assert(TCPMSG_STATIC_RXBUF < TCPMSG_MAX_PAYLOAD_ENCRYPTED,
               "static buffer must be smaller than hard cap");
 
 static constexpr uint8_t  TCPMSG_ID_BROADCAST = 0xFF;
+static constexpr uint8_t  TCPMSG_TYPE_ACK = 0xFE;
+static constexpr uint32_t TCPMSG_ACK_TIMEOUT_MS = 500u;
+
+static constexpr uint8_t TCPMSG_ACK_CODE_OK  = 0;
+static constexpr uint8_t TCPMSG_ACK_CODE_ERR = 1;
+static constexpr uint8_t TCPMSG_ACK_FLAG_WRONG_DST     = 0x01;
+static constexpr uint8_t TCPMSG_ACK_FLAG_BAD_FORMAT    = 0x02;
+static constexpr uint8_t TCPMSG_ACK_FLAG_INTERNAL_ERROR= 0x04;
 
 // ------------------------------------------------------------------
 // Result codes
@@ -89,6 +98,9 @@ public:
         std::vector<uint8_t> frame;   // header(4) + encrypted payload
         TCPMsgRemoteInfo     to;      // ip/host/port (host may still need DNS)
         bool                 needResolve=false;
+        uint8_t              expectedDstMac[6] = {0,0,0,0,0,0};
+        uint16_t             seq = 0;
+        uint16_t             plainLen = 0;
     };
 
     explicit TCPMessenger(EncryptionHandler* enc = nullptr);
@@ -111,30 +123,38 @@ public:
     TCPMsgResult sendToHost(const Serializable& m,
                         uint8_t chan,
                         const char* host,
+                        const uint8_t expectedDstMac[6],
                         uint16_t port = TCPMSG_DEFAULT_PORT)
     {
-        return sendTo(m, chan, host, IPAddress(), port, /*needResolve=*/true);
+        return sendTo(m, chan, host, IPAddress(), expectedDstMac, port, /*needResolve=*/true);
     }
     //overwrite for Arduino string
     TCPMsgResult sendToHost(const Serializable& m,
                         uint8_t chan,
                         const String& host,
+                        const uint8_t expectedDstMac[6],
                         uint16_t port = TCPMSG_DEFAULT_PORT)
     {
-        return sendToHost(m, chan, host.c_str(), port);
+        return sendToHost(m, chan, host.c_str(), expectedDstMac, port);
     }
     
     TCPMsgResult sendToIP(const Serializable& m,
                           uint8_t chan,
                           const IPAddress& ip,
+                          const uint8_t expectedDstMac[6],
                           uint16_t port = TCPMSG_DEFAULT_PORT)
     {
-        return sendTo(m, chan, /*hostStr=*/nullptr, ip, port, /*needResolve=*/false);
+        return sendTo(m, chan, /*hostStr=*/nullptr, ip, expectedDstMac, port, /*needResolve=*/false);
     }
 
 
     void onReceive (TCPMsgReceiveCB cb) { recvCB_  = cb; }
     void onSendDone(TCPMsgSendDoneCB cb) { sendDoneCB_ = cb; }
+    bool isBusy() const { return sendBusy_; }
+    bool lastSendOk() const { return lastSendOk_; }
+    uint8_t lastSendFlags() const { return lastSendFlags_; }
+    const uint8_t* lastAckMac() const { return lastAckMac_; }
+    uint16_t lastSendSeq() const { return lastSendSeq_; }
 
     void loop();   // no-op (kept for symmetry)
 
@@ -182,9 +202,18 @@ private:
 
     // frame handling
     void parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len);
-    void dispatchFrame(const TCPMsgRemoteInfo& from,
+    void dispatchFrame(ClientCtx* ctx,
                        uint8_t type, uint8_t chan,
                        const uint8_t* encPayload, uint16_t encLen);
+    void sendAckInline(AsyncClient* client, uint8_t chan, uint16_t seq,
+                       uint8_t ackCode, uint8_t flags, const uint8_t rxMac[6]);
+    void buildEnvelope(const uint8_t srcMac[6], const uint8_t dstMac[6], uint16_t seq,
+                       const std::vector<uint8_t>& appPayload,
+                       std::vector<uint8_t>& outPlain);
+    bool parseEnvelope(const uint8_t* plain, uint16_t len,
+                       const uint8_t*& appPayload, uint16_t& appLen,
+                       uint16_t& seq, uint8_t srcMac[6], uint8_t dstMac[6]) const;
+    void getLocalMac(uint8_t out[6]) const;
 
     // send path helpers
     TCPMsgResult buildPlain(const Serializable& msg,
@@ -202,10 +231,12 @@ private:
         uint8_t   type;
         uint8_t   chan;
         uint16_t  encLen;
+        uint16_t  plainLen;
+        uint16_t  seq;
         std::vector<uint8_t> frame;
         TCPMessenger* self;
         OutboundCtx() : client(nullptr), type(0), chan(0),
-                        encLen(0), self(nullptr) {}
+                        encLen(0), plainLen(0), seq(0), self(nullptr) {}
     };
     static void _onOutboundConnect   (void* arg, AsyncClient* c);
     static void _onOutboundError     (void* arg, AsyncClient* c, int8_t error);
@@ -231,6 +262,7 @@ private:
                         uint8_t             chan,
                         const char*         hostStr,
                         const IPAddress&    ip,
+                        const uint8_t       expectedDstMac[6],
                         uint16_t            port,
                         bool                needResolve);
 
@@ -251,6 +283,11 @@ private:
     bool              sendBusy_;
     PendingSend       pending_;
     bool              taskRunning_;
+    uint16_t          nextSeq_ = 1;
+    bool              lastSendOk_ = false;
+    uint8_t           lastSendFlags_ = 0;
+    uint8_t           lastAckMac_[6] = {0,0,0,0,0,0};
+    uint16_t          lastSendSeq_ = 0;
 
     //for better callbacks
 

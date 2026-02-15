@@ -304,7 +304,7 @@ void TCPMessenger::parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len)
 
             if (ctx->headerPos == 4) {                    // header complete
                 if (ctx->rxLen == 0) {                    // empty payload
-                    dispatchFrame(ctx->remote, ctx->rxType, ctx->rxChan, nullptr, 0);
+                    dispatchFrame(ctx, ctx->rxType, ctx->rxChan, nullptr, 0);
                     ctx->headerPos = 0;
                 } else if (ctx->rxLen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) {
                     ctx->client->close(true);             // hard cap violated
@@ -323,7 +323,7 @@ void TCPMessenger::parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len)
         dest[ctx->rxPos++] = b;
 
         if (ctx->rxPos >= ctx->rxLen) {   // full frame ready
-            dispatchFrame(ctx->remote, ctx->rxType, ctx->rxChan,
+            dispatchFrame(ctx, ctx->rxType, ctx->rxChan,
                           dest, ctx->rxLen);
             ctx->headerPos = 0;           // reset for next frame
         }
@@ -334,42 +334,161 @@ void TCPMessenger::parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len)
 // ------------------------------------------------------------------
 // Dispatch a received frame (decrypt + user callback)
 // ------------------------------------------------------------------
-void TCPMessenger::dispatchFrame(const TCPMsgRemoteInfo& from,
+void TCPMessenger::dispatchFrame(ClientCtx* ctx,
                                  uint8_t  type,
                                  uint8_t  chanId,
                                  const uint8_t* encPayload,
                                  uint16_t encLen)          // <-- widened
 {
+    if (!ctx) return;
+    if (type == TCPMSG_TYPE_ACK) return;
+
+    uint8_t myMac[6] = {0,0,0,0,0,0};
+    getLocalMac(myMac);
+
+    std::vector<uint8_t> plain;
+    if (enc_ && encLen) {
+        std::vector<uint8_t> encVec(encPayload, encPayload + encLen);
+        if (!enc_->decrypt(encVec, plain)) {
+            sendAckInline(ctx->client, chanId, 0, TCPMSG_ACK_CODE_ERR,
+                          TCPMSG_ACK_FLAG_BAD_FORMAT, myMac);
+            return;
+        }
+    } else if (enc_ && !encLen) {
+        sendAckInline(ctx->client, chanId, 0, TCPMSG_ACK_CODE_ERR,
+                      TCPMSG_ACK_FLAG_BAD_FORMAT, myMac);
+        return;
+    } else {
+        if (encLen) plain.assign(encPayload, encPayload + encLen);
+    }
+
+    const uint8_t* appPayload = nullptr;
+    uint16_t appLen = 0;
+    uint16_t seq = 0;
+    uint8_t srcMac[6] = {0,0,0,0,0,0};
+    uint8_t dstMac[6] = {0,0,0,0,0,0};
+
+    if (!parseEnvelope(plain.data(), static_cast<uint16_t>(plain.size()),
+                       appPayload, appLen, seq, srcMac, dstMac)) {
+        sendAckInline(ctx->client, chanId, 0, TCPMSG_ACK_CODE_ERR,
+                      TCPMSG_ACK_FLAG_BAD_FORMAT, myMac);
+        return;
+    }
+
+    if (memcmp(dstMac, myMac, sizeof(myMac)) != 0) {
+        sendAckInline(ctx->client, chanId, seq, TCPMSG_ACK_CODE_ERR,
+                      TCPMSG_ACK_FLAG_WRONG_DST, myMac);
+        return;
+    }
+
     // Allocate item
     RecvItem* it = new RecvItem();
-    if (!it) return; // drop if OOM
-    it->from        = from;
+    if (!it) {
+        sendAckInline(ctx->client, chanId, seq, TCPMSG_ACK_CODE_ERR,
+                      TCPMSG_ACK_FLAG_INTERNAL_ERROR, myMac);
+        return;
+    }
+    it->from        = ctx->remote;
     it->type        = type;
     it->chan        = chanId;
-    it->len         = encLen;
-    it->isEncrypted = (enc_ != nullptr);
+    it->len         = appLen;
+    it->isEncrypted = false;
     it->data        = nullptr;
 
-    if (encLen) {
-        it->data = static_cast<uint8_t*>(pvPortMalloc(encLen));
-        if (!it->data) { delete it; return; }  // drop if OOM
-        memcpy(it->data, encPayload, encLen);
+    if (appLen) {
+        it->data = static_cast<uint8_t*>(pvPortMalloc(appLen));
+        if (!it->data) {
+            delete it;
+            sendAckInline(ctx->client, chanId, seq, TCPMSG_ACK_CODE_ERR,
+                          TCPMSG_ACK_FLAG_INTERNAL_ERROR, myMac);
+            return;
+        }
+        memcpy(it->data, appPayload, appLen);
     }
 
-    if (!rxQueue_ || xQueueSendToBack(rxQueue_, &it, 0) != pdTRUE) {
-    RecvItem* old = nullptr;
-    if (rxQueue_ && xQueueReceive(rxQueue_, &old, 0) == pdTRUE) {
-        // free the oldest
-        if (old) { if (old->data) vPortFree(old->data); delete old; }
-        // retry enqueue once
-        if (xQueueSendToBack(rxQueue_, &it, 0) == pdTRUE) {
-            return; // success after evicting oldest
+    bool queued = false;
+    if (rxQueue_ && xQueueSendToBack(rxQueue_, &it, 0) == pdTRUE) {
+        queued = true;
+    } else {
+        RecvItem* old = nullptr;
+        if (rxQueue_ && xQueueReceive(rxQueue_, &old, 0) == pdTRUE) {
+            if (old) { if (old->data) vPortFree(old->data); delete old; }
+            if (xQueueSendToBack(rxQueue_, &it, 0) == pdTRUE) {
+                queued = true;
+            }
         }
     }
-    // still full or no queue: drop newest
-    if (it->data) vPortFree(it->data);
-    delete it;
+
+    if (!queued) {
+        if (it->data) vPortFree(it->data);
+        delete it;
+        sendAckInline(ctx->client, chanId, seq, TCPMSG_ACK_CODE_ERR,
+                      TCPMSG_ACK_FLAG_INTERNAL_ERROR, myMac);
+        return;
+    }
+
+    sendAckInline(ctx->client, chanId, seq, TCPMSG_ACK_CODE_OK, 0, myMac);
 }
+
+void TCPMessenger::buildEnvelope(const uint8_t srcMac[6], const uint8_t dstMac[6], uint16_t seq,
+                                 const std::vector<uint8_t>& appPayload,
+                                 std::vector<uint8_t>& outPlain) {
+    outPlain.resize(14u + appPayload.size());
+    memcpy(&outPlain[0], srcMac, 6);
+    memcpy(&outPlain[6], dstMac, 6);
+    outPlain[12] = static_cast<uint8_t>(seq & 0xFF);
+    outPlain[13] = static_cast<uint8_t>((seq >> 8) & 0xFF);
+    if (!appPayload.empty()) {
+        memcpy(&outPlain[14], appPayload.data(), appPayload.size());
+    }
+}
+
+bool TCPMessenger::parseEnvelope(const uint8_t* plain, uint16_t len,
+                                 const uint8_t*& appPayload, uint16_t& appLen,
+                                 uint16_t& seq, uint8_t srcMac[6], uint8_t dstMac[6]) const {
+    if (!plain || len < 14) return false;
+    memcpy(srcMac, &plain[0], 6);
+    memcpy(dstMac, &plain[6], 6);
+    seq = static_cast<uint16_t>(plain[12]) |
+          (static_cast<uint16_t>(plain[13]) << 8);
+    appPayload = &plain[14];
+    appLen = static_cast<uint16_t>(len - 14);
+    return true;
+}
+
+void TCPMessenger::getLocalMac(uint8_t out[6]) const {
+    if (!out) return;
+    WiFi.macAddress(out);
+}
+
+void TCPMessenger::sendAckInline(AsyncClient* client, uint8_t chan, uint16_t seq,
+                                 uint8_t ackCode, uint8_t flags,
+                                 const uint8_t rxMac[6]) {
+    if (!client) return;
+    uint8_t payload[10];
+    payload[0] = static_cast<uint8_t>(seq & 0xFF);
+    payload[1] = static_cast<uint8_t>((seq >> 8) & 0xFF);
+    payload[2] = ackCode;
+    payload[3] = flags;
+    memcpy(&payload[4], rxMac, 6);
+
+    std::vector<uint8_t> wire(payload, payload + sizeof(payload));
+    if (enc_) {
+        std::vector<uint8_t> encrypted = enc_->encrypt(wire);
+        wire.swap(encrypted);
+    }
+
+    std::vector<uint8_t> frame(4 + wire.size());
+    frame[0] = TCPMSG_TYPE_ACK;
+    frame[1] = chan;
+    frame[2] = static_cast<uint8_t>(wire.size() & 0xFF);
+    frame[3] = static_cast<uint8_t>((wire.size() >> 8) & 0xFF);
+    if (!wire.empty()) memcpy(&frame[4], wire.data(), wire.size());
+
+    size_t written = client->write(reinterpret_cast<const char*>(frame.data()), frame.size());
+    if (written == frame.size()) {
+        client->send();
+    }
 }
 
 
@@ -444,14 +563,22 @@ TCPMsgResult TCPMessenger::sendTo(const Serializable& msg,
                                           uint8_t             chan,
                                           const char*         hostStr,
                                           const IPAddress&    ip,
+                                          const uint8_t       expectedDstMac[6],
                                           uint16_t            port,
                                           bool                needResolve)
 {
     /* ---------- fast local work: build + encrypt ------------------- */
-    std::vector<uint8_t> plain;
+    std::vector<uint8_t> appPlain;
     uint8_t type = 0;
-    TCPMsgResult rc = buildPlain(msg, plain, type);
+    TCPMsgResult rc = buildPlain(msg, appPlain, type);
     if (rc != TCPMSG_OK) return rc;
+
+    uint8_t srcMac[6] = {0,0,0,0,0,0};
+    getLocalMac(srcMac);
+    const uint16_t seq = nextSeq_++;
+    std::vector<uint8_t> plain;
+    buildEnvelope(srcMac, expectedDstMac, seq, appPlain, plain);
+
     rc = encryptPayload(plain);
     if (rc != TCPMSG_OK) return rc;
 
@@ -470,6 +597,12 @@ TCPMsgResult TCPMessenger::sendTo(const Serializable& msg,
     pending_.frame       = std::move(frame);
     pending_.to.port     = port;
     pending_.needResolve = needResolve;
+    memcpy(pending_.expectedDstMac, expectedDstMac, sizeof(pending_.expectedDstMac));
+    pending_.seq = seq;
+    pending_.plainLen = static_cast<uint16_t>(appPlain.size());
+    lastSendSeq_ = seq;
+    lastSendFlags_ = 0;
+    memset(lastAckMac_, 0, sizeof(lastAckMac_));
 
     if (needResolve) {
         pending_.to.host = hostStr ? String(hostStr) : String();
@@ -510,7 +643,7 @@ void TCPMessenger::sendWorkerLoop()
         if (job.needResolve) {
             if (!resolveHost(job.to.host.c_str(), job.to.ip)) {
                 notifySendDone(TCPMSG_ERR_RESOLVE, job.to,
-                               job.frame[0], job.frame[1], 0);
+                               job.frame[0], job.frame[1], job.plainLen);
                 clearPending();
                 continue;
             }
@@ -524,7 +657,7 @@ void TCPMessenger::sendWorkerLoop()
                             static_cast<uint16_t>(job.frame.size()-4));
 
         if (rc != TCPMSG_OK) {
-            notifySendDone(rc, job.to, job.frame[0], job.frame[1], 0);
+            notifySendDone(rc, job.to, job.frame[0], job.frame[1], job.plainLen);
             clearPending();
         }
         /* success path: onOutbound* callback will clearPending() */
@@ -557,6 +690,8 @@ TCPMsgResult TCPMessenger::sendFrame(const TCPMsgRemoteInfo& to,
     if (!ctx) { delete c; return TCPMSG_ERR_TRANSPORT; }
     ctx->client = c; ctx->to = to; ctx->type = type;
     ctx->chan   = chan; ctx->encLen = encLen; ctx->self = this;
+    ctx->plainLen = pending_.plainLen;
+    ctx->seq = pending_.seq;
 
     ctx->frame.resize(4 + encLen);
     ctx->frame[0] = type;
@@ -609,7 +744,7 @@ void TCPMessenger::onOutboundConnect(OutboundCtx* ctx, AsyncClient* c) {
     }
     c->send();
     notifySendDone(TCPMSG_OK, ctx->to, ctx->type, ctx->chan,
-                   ctx->encLen - (enc_ ? EncryptionHandler::CHECKSUM_SIZE : 0));
+                   ctx->plainLen);
     c->close(true);
     clearPending();
 }
@@ -640,6 +775,7 @@ void TCPMessenger::notifySendDone(TCPMsgResult rc, const TCPMsgRemoteInfo& to,
                                   uint8_t type, uint8_t chanId,
                                   uint16_t encLenMinusMaybe)
 {
+    lastSendOk_ = (rc == TCPMSG_OK);
     if (!sendDoneCB_) return;
     uint16_t plain = encLenMinusMaybe;
     if (enc_ && encLenMinusMaybe >= EncryptionHandler::CHECKSUM_SIZE)
