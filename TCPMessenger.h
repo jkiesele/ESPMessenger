@@ -39,16 +39,18 @@ static constexpr uint8_t  TCPMSG_ID_BROADCAST = 0xFF;
 // ------------------------------------------------------------------
 enum TCPMsgResult : uint8_t {
     TCPMSG_OK = 0,
-    TCPMSG_ERR_NOT_CONNECTED,
-    TCPMSG_ERR_RESOLVE,
-    TCPMSG_ERR_TOO_LARGE,
-    TCPMSG_ERR_ENCRYPT,
+    TCPMSG_ERR_NOT_CONNECTED, //1
+    TCPMSG_ERR_RESOLVE, //2
+    TCPMSG_ERR_TOO_LARGE, //3
+    TCPMSG_ERR_ENCRYPT, //4
     TCPMSG_ERR_WRITE,
     TCPMSG_ERR_TRANSPORT,
-    TCPMSG_ERR_DECODE,
+    TCPMSG_ERR_DECODE, //7
     TCPMSG_QUEUED,  // queued for sending
     TCPMSG_ERR_BUSY, // busy with another send
 };
+
+
 
 // ------------------------------------------------------------------
 // Remote info passed to callbacks
