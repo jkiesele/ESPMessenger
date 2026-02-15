@@ -10,7 +10,6 @@
 #include <stdint.h>
 #include <functional>
 #include <vector>
-#include <array>
 
 #include <WiFi.h>
 #include <AsyncTCP.h>
@@ -57,6 +56,9 @@ enum TCPMsgResult : uint8_t {
     TCPMSG_ERR_DECODE, //7
     TCPMSG_QUEUED,  // queued for sending
     TCPMSG_ERR_BUSY, // busy with another send
+    TCPMSG_ERR_WRONGDSTMAC,
+    TCPMSG_ERR_ACK_TIMEOUT,
+    TCPMSG_ERR_ACK,
 };
 
 
@@ -223,7 +225,8 @@ private:
     bool         resolveHost(const char* host, IPAddress& outIP);
     TCPMsgResult sendFrame(const TCPMsgRemoteInfo& to,
                            uint8_t type, uint8_t chan,
-                           const uint8_t* encPayload, uint16_t encLen);
+                           const uint8_t* encPayload, uint16_t encLen,
+                           uint16_t seq, uint16_t plainLen);
 
     struct OutboundCtx {
         AsyncClient* client;
@@ -234,17 +237,38 @@ private:
         uint16_t  plainLen;
         uint16_t  seq;
         std::vector<uint8_t> frame;
+        uint8_t   headerPos;
+        uint8_t   rxType;
+        uint8_t   rxChan;
+        uint16_t  rxLen;
+        uint16_t  rxPos;
+        uint8_t   rxBufStatic[TCPMSG_STATIC_RXBUF];
+        std::vector<uint8_t> rxBufDyn;
+        bool      useDyn;
+        bool      requestWritten;
+        bool      completed;
+        uint32_t  waitStartMs;
         TCPMessenger* self;
         OutboundCtx() : client(nullptr), type(0), chan(0),
-                        encLen(0), plainLen(0), seq(0), self(nullptr) {}
+                        encLen(0), plainLen(0), seq(0),
+                        headerPos(0), rxType(0), rxChan(0),
+                        rxLen(0), rxPos(0), useDyn(false),
+                        requestWritten(false), completed(false), waitStartMs(0),
+                        self(nullptr) {}
     };
     static void _onOutboundConnect   (void* arg, AsyncClient* c);
     static void _onOutboundError     (void* arg, AsyncClient* c, int8_t error);
     static void _onOutboundDisconnect(void* arg, AsyncClient* c);
+    static void _onOutboundData      (void* arg, AsyncClient* c, void* data, size_t len);
+    static void _onOutboundTimeout   (void* arg, AsyncClient* c, uint32_t time);
+    static void _onOutboundPoll      (void* arg, AsyncClient* c);
 
     void onOutboundConnect   (OutboundCtx* ctx, AsyncClient* c);
     void onOutboundError     (OutboundCtx* ctx, AsyncClient* c, int8_t error);
     void onOutboundDisconnect(OutboundCtx* ctx, AsyncClient* c);
+    void onOutboundData      (OutboundCtx* ctx, AsyncClient* c, const uint8_t* data, size_t len);
+    void onOutboundTimeout   (OutboundCtx* ctx, AsyncClient* c, uint32_t time);
+    void onOutboundPoll      (OutboundCtx* ctx, AsyncClient* c);
 
     void notifySendDone(TCPMsgResult rc, const TCPMsgRemoteInfo& to,
                         uint8_t type, uint8_t chan, uint16_t plainLen);

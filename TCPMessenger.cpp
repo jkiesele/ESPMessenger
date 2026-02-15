@@ -567,6 +567,13 @@ TCPMsgResult TCPMessenger::sendTo(const Serializable& msg,
                                           uint16_t            port,
                                           bool                needResolve)
 {
+    if (!expectedDstMac) return TCPMSG_ERR_WRONGDSTMAC;
+    bool allZeroDstMac = true;
+    for (uint8_t i = 0; i < 6; ++i) {
+        if (expectedDstMac[i] != 0) { allZeroDstMac = false; break; }
+    }
+    if (allZeroDstMac) return TCPMSG_ERR_WRONGDSTMAC;
+
     /* ---------- fast local work: build + encrypt ------------------- */
     std::vector<uint8_t> appPlain;
     uint8_t type = 0;
@@ -654,7 +661,9 @@ void TCPMessenger::sendWorkerLoop()
                             job.frame[0],           // type
                             job.frame[1],           // chan
                             &job.frame[4],
-                            static_cast<uint16_t>(job.frame.size()-4));
+                            static_cast<uint16_t>(job.frame.size()-4),
+                            job.seq,
+                            job.plainLen);
 
         if (rc != TCPMSG_OK) {
             notifySendDone(rc, job.to, job.frame[0], job.frame[1], job.plainLen);
@@ -680,7 +689,9 @@ void TCPMessenger::clearPending()
 TCPMsgResult TCPMessenger::sendFrame(const TCPMsgRemoteInfo& to,
                                      uint8_t type, uint8_t chan,
                                      const uint8_t* encPayload,
-                                     uint16_t encLen)
+                                     uint16_t encLen,
+                                     uint16_t seq,
+                                     uint16_t plainLen)
 {
     AsyncClient* c = new AsyncClient();
     if (!c) return TCPMSG_ERR_TRANSPORT;
@@ -690,8 +701,8 @@ TCPMsgResult TCPMessenger::sendFrame(const TCPMsgRemoteInfo& to,
     if (!ctx) { delete c; return TCPMSG_ERR_TRANSPORT; }
     ctx->client = c; ctx->to = to; ctx->type = type;
     ctx->chan   = chan; ctx->encLen = encLen; ctx->self = this;
-    ctx->plainLen = pending_.plainLen;
-    ctx->seq = pending_.seq;
+    ctx->plainLen = plainLen;
+    ctx->seq = seq;
 
     ctx->frame.resize(4 + encLen);
     ctx->frame[0] = type;
@@ -703,9 +714,19 @@ TCPMsgResult TCPMessenger::sendFrame(const TCPMsgRemoteInfo& to,
     c->onConnect(&_onOutboundConnect, ctx);
     c->onError(&_onOutboundError, ctx);
     c->onDisconnect(&_onOutboundDisconnect, ctx);
+    c->onData(&_onOutboundData, ctx);
+    c->onTimeout(&_onOutboundTimeout, ctx);
+    c->onPoll(&_onOutboundPoll, ctx);
 
     if (!c->connect(to.ip, to.port)) {
-        _onOutboundError(ctx, c, -1);
+        c->onConnect(nullptr, nullptr);
+        c->onError(nullptr, nullptr);
+        c->onDisconnect(nullptr, nullptr);
+        c->onData(nullptr, nullptr);
+        c->onTimeout(nullptr, nullptr);
+        c->onPoll(nullptr, nullptr);
+        delete ctx;
+        delete c;
         return TCPMSG_ERR_TRANSPORT;
     }
     return TCPMSG_OK;
@@ -730,6 +751,23 @@ void TCPMessenger::_onOutboundDisconnect(void* arg, AsyncClient* c) {
     if (ctx && ctx->self) ctx->self->onOutboundDisconnect(ctx, c);
 }
 
+void TCPMessenger::_onOutboundData(void* arg, AsyncClient* c, void* data, size_t len) {
+    OutboundCtx* ctx = reinterpret_cast<OutboundCtx*>(arg);
+    if (ctx && ctx->self) {
+        ctx->self->onOutboundData(ctx, c, static_cast<const uint8_t*>(data), len);
+    }
+}
+
+void TCPMessenger::_onOutboundTimeout(void* arg, AsyncClient* c, uint32_t time) {
+    OutboundCtx* ctx = reinterpret_cast<OutboundCtx*>(arg);
+    if (ctx && ctx->self) ctx->self->onOutboundTimeout(ctx, c, time);
+}
+
+void TCPMessenger::_onOutboundPoll(void* arg, AsyncClient* c) {
+    OutboundCtx* ctx = reinterpret_cast<OutboundCtx*>(arg);
+    if (ctx && ctx->self) ctx->self->onOutboundPoll(ctx, c);
+}
+
 
 // ------------------------------------------------------------------
 // Outbound instance handlers
@@ -743,44 +781,136 @@ void TCPMessenger::onOutboundConnect(OutboundCtx* ctx, AsyncClient* c) {
         return;
     }
     c->send();
-    notifySendDone(TCPMSG_OK, ctx->to, ctx->type, ctx->chan,
-                   ctx->plainLen);
-    c->close(true);
-    clearPending();
+    ctx->requestWritten = true;
+    ctx->waitStartMs = millis();
 }
 
 
 void TCPMessenger::onOutboundError(OutboundCtx* ctx, AsyncClient* c, int8_t /*error*/) {
     if (!ctx) return;
-    notifySendDone(TCPMSG_ERR_WRITE, ctx->to, ctx->type, ctx->chan, 0);
+    if (!ctx->completed) {
+        const TCPMsgResult rc = ctx->requestWritten ? TCPMSG_ERR_ACK_TIMEOUT : TCPMSG_ERR_WRITE;
+        lastSendFlags_ = 0;
+        memset(lastAckMac_, 0, sizeof(lastAckMac_));
+        notifySendDone(rc, ctx->to, ctx->type, ctx->chan, ctx->plainLen);
+        ctx->completed = true;
+    }
     if (c) c->close(true);
-    clearPending();
 }
 
 void TCPMessenger::onOutboundDisconnect(OutboundCtx* ctx, AsyncClient* c) {
     (void)c;
     if (ctx) {
+        if (!ctx->completed) {
+            lastSendFlags_ = 0;
+            memset(lastAckMac_, 0, sizeof(lastAckMac_));
+            notifySendDone(TCPMSG_ERR_ACK_TIMEOUT, ctx->to, ctx->type, ctx->chan, ctx->plainLen);
+            ctx->completed = true;
+        }
         delete ctx->client;
         delete ctx;
     }
     clearPending(); 
 }
 
+void TCPMessenger::onOutboundData(OutboundCtx* ctx, AsyncClient* c, const uint8_t* data, size_t len) {
+    if (!ctx || ctx->completed || !ctx->requestWritten) return;
+
+    while (len--) {
+        const uint8_t b = *data++;
+        if (ctx->headerPos < 4) {
+            switch (ctx->headerPos) {
+                case 0: ctx->rxType = b; break;
+                case 1: ctx->rxChan = b; break;
+                case 2: ctx->rxLen  = b; break;
+                case 3: ctx->rxLen |= static_cast<uint16_t>(b) << 8; break;
+            }
+            ctx->headerPos++;
+
+            if (ctx->headerPos == 4) {
+                if (ctx->rxLen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) {
+                    lastSendFlags_ = TCPMSG_ACK_FLAG_BAD_FORMAT;
+                    memset(lastAckMac_, 0, sizeof(lastAckMac_));
+                    notifySendDone(TCPMSG_ERR_ACK, ctx->to, ctx->type, ctx->chan, ctx->plainLen);
+                    ctx->completed = true;
+                    c->close(true);
+                    return;
+                }
+                ctx->useDyn = (ctx->rxLen > TCPMSG_STATIC_RXBUF);
+                if (ctx->useDyn) ctx->rxBufDyn.resize(ctx->rxLen);
+                ctx->rxPos = 0;
+                if (ctx->rxLen == 0) {
+                    ctx->headerPos = 0;
+                }
+            }
+            continue;
+        }
+
+        uint8_t* dest = ctx->useDyn ? ctx->rxBufDyn.data() : ctx->rxBufStatic;
+        dest[ctx->rxPos++] = b;
+        if (ctx->rxPos < ctx->rxLen) continue;
+
+        const uint8_t* encAck = dest;
+        uint16_t encAckLen = ctx->rxLen;
+        ctx->headerPos = 0;
+
+        if (ctx->rxType != TCPMSG_TYPE_ACK) continue;
+
+        std::vector<uint8_t> ackPlain;
+        if (enc_ && encAckLen) {
+            std::vector<uint8_t> encVec(encAck, encAck + encAckLen);
+            if (!enc_->decrypt(encVec, ackPlain)) continue;
+        } else if (!enc_) {
+            ackPlain.assign(encAck, encAck + encAckLen);
+        } else {
+            continue;
+        }
+
+        if (ackPlain.size() < 10) continue;
+        const uint16_t ackSeq = static_cast<uint16_t>(ackPlain[0]) |
+                                (static_cast<uint16_t>(ackPlain[1]) << 8);
+        if (ackSeq != ctx->seq) continue;
+
+        const uint8_t ackCode = ackPlain[2];
+        lastSendFlags_ = ackPlain[3];
+        memcpy(lastAckMac_, &ackPlain[4], 6);
+
+        notifySendDone((ackCode == TCPMSG_ACK_CODE_OK) ? TCPMSG_OK : TCPMSG_ERR_ACK,
+                       ctx->to, ctx->type, ctx->chan, ctx->plainLen);
+        ctx->completed = true;
+        c->close(true);
+        return;
+    }
+}
+
+void TCPMessenger::onOutboundTimeout(OutboundCtx* ctx, AsyncClient* c, uint32_t /*time*/) {
+    if (!ctx || ctx->completed) return;
+    lastSendFlags_ = 0;
+    memset(lastAckMac_, 0, sizeof(lastAckMac_));
+    notifySendDone(TCPMSG_ERR_ACK_TIMEOUT, ctx->to, ctx->type, ctx->chan, ctx->plainLen);
+    ctx->completed = true;
+    if (c) c->close(true);
+}
+
+void TCPMessenger::onOutboundPoll(OutboundCtx* ctx, AsyncClient* c) {
+    if (!ctx || ctx->completed || !ctx->requestWritten) return;
+    if (static_cast<uint32_t>(millis() - ctx->waitStartMs) >= TCPMSG_ACK_TIMEOUT_MS) {
+        onOutboundTimeout(ctx, c, TCPMSG_ACK_TIMEOUT_MS);
+    }
+}
+
 
 // ------------------------------------------------------------------
 // Notify app about send completion
-// plainLen = encryptedLen minus CRC (if encryption used)
+// plainLen is the original application payload length (without envelope)
 // ------------------------------------------------------------------
 void TCPMessenger::notifySendDone(TCPMsgResult rc, const TCPMsgRemoteInfo& to,
                                   uint8_t type, uint8_t chanId,
-                                  uint16_t encLenMinusMaybe)
+                                  uint16_t plainLen)
 {
     lastSendOk_ = (rc == TCPMSG_OK);
     if (!sendDoneCB_) return;
-    uint16_t plain = encLenMinusMaybe;
-    if (enc_ && encLenMinusMaybe >= EncryptionHandler::CHECKSUM_SIZE)
-        plain = encLenMinusMaybe - EncryptionHandler::CHECKSUM_SIZE;
-    sendDoneCB_(rc, to, type, chanId, plain);
+    sendDoneCB_(rc, to, type, chanId, plainLen);
 }
 
 
