@@ -35,6 +35,9 @@ static_assert(TCPMSG_STATIC_RXBUF < TCPMSG_MAX_PAYLOAD_ENCRYPTED,
 static constexpr uint8_t  TCPMSG_ID_BROADCAST = 0xFF;
 static constexpr uint8_t  TCPMSG_TYPE_ACK = 0xFE;
 static constexpr uint32_t TCPMSG_ACK_TIMEOUT_MS = 500u;
+static constexpr uint16_t TCPMSG_FRAME_HEADER_LEN = 4u;
+static constexpr uint16_t TCPMSG_ENVELOPE_HEADER_LEN = 14u;
+static constexpr uint16_t TCPMSG_ACK_PLAIN_LEN = 10u;
 
 static constexpr uint8_t TCPMSG_ACK_CODE_OK  = 0;
 static constexpr uint8_t TCPMSG_ACK_CODE_ERR = 1;
@@ -70,6 +73,8 @@ struct TCPMsgRemoteInfo {
     IPAddress ip;
     uint16_t  port;
     String    host;   // may be empty
+    uint8_t   mac[6] = {0,0,0,0,0,0}; // sender MAC from envelope (inbound)
+    uint16_t  seq = 0;                 // envelope seq (inbound)
 };
 
 
@@ -97,7 +102,7 @@ class TCPMessenger {
 public:
 
     struct PendingSend {
-        std::vector<uint8_t> frame;   // header(4) + encrypted payload
+        std::vector<uint8_t> frame;   // header + encrypted payload
         TCPMsgRemoteInfo     to;      // ip/host/port (host may still need DNS)
         bool                 needResolve=false;
         uint8_t              expectedDstMac[6] = {0,0,0,0,0,0};
@@ -109,6 +114,7 @@ public:
     ~TCPMessenger();
 
     void begin(){
+        cacheLocalMac();
         mdnsSniffer_.begin();
         beginServer(TCPMSG_DEFAULT_PORT);
     }
@@ -175,10 +181,11 @@ private:
         uint8_t   rxBufStatic[TCPMSG_STATIC_RXBUF];
         std::vector<uint8_t> rxBufDyn;
         bool      useDyn;
+        bool      closing;
 
         explicit ClientCtx(AsyncClient* c)
         : client(c), headerPos(0), rxType(0), rxChan(0),
-          rxLen(0), rxPos(0), useDyn(false) {}
+          rxLen(0), rxPos(0), useDyn(false), closing(false) {}
     };
 
     // linked list
@@ -216,8 +223,8 @@ private:
                        const uint8_t*& appPayload, uint16_t& appLen,
                        uint16_t& seq, uint8_t srcMac[6], uint8_t dstMac[6]) const;
     void getLocalMac(uint8_t out[6]) const;
+    void cacheLocalMac();
 
-    // send path helpers
     TCPMsgResult buildPlain(const Serializable& msg,
                             std::vector<uint8_t>& outPlain,
                             uint8_t& outType);
@@ -312,6 +319,7 @@ private:
     uint8_t           lastSendFlags_ = 0;
     uint8_t           lastAckMac_[6] = {0,0,0,0,0,0};
     uint16_t          lastSendSeq_ = 0;
+    uint8_t           localMac_[6] = {0,0,0,0,0,0};
 
     //for better callbacks
 
