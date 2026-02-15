@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <functional>
 #include <vector>
+#include <cstring> // memcpy, memcmp
 
 #include <WiFi.h>
 #include <AsyncTCP.h>
@@ -45,6 +46,37 @@ static constexpr uint8_t TCPMSG_ACK_FLAG_WRONG_DST     = 0x01;
 static constexpr uint8_t TCPMSG_ACK_FLAG_BAD_FORMAT    = 0x02;
 static constexpr uint8_t TCPMSG_ACK_FLAG_INTERNAL_ERROR= 0x04;
 
+
+// ------------------------------------------------------------------
+// Helper classes
+// ------------------------------------------------------------------
+class MACAddress {
+public:
+    MACAddress() : bytes_{0,0,0,0,0,0} {}
+
+    // only accepts a real uint8_t[6] lvalue
+    explicit MACAddress(const uint8_t (&b)[6]) { memcpy(bytes_, b, 6); }
+
+    void setBytes(const uint8_t* p) {
+        if (p) memcpy(bytes_, p, 6);
+    }
+
+    bool isZero() const {
+        static const uint8_t z[6] = {0,0,0,0,0,0};
+        return memcmp(bytes_, z, 6) == 0;
+    }
+
+    const uint8_t* data() const { return bytes_; }
+
+    bool operator==(const MACAddress& o) const { return memcmp(bytes_, o.bytes_, 6) == 0; }
+    bool operator!=(const MACAddress& o) const { return !(*this == o); }
+
+private:
+    uint8_t bytes_[6];
+};
+
+
+
 // ------------------------------------------------------------------
 // Result codes
 // ------------------------------------------------------------------
@@ -73,7 +105,7 @@ struct TCPMsgRemoteInfo {
     IPAddress ip;
     uint16_t  port;
     String    host;   // may be empty
-    uint8_t   mac[6] = {0,0,0,0,0,0}; // sender MAC from envelope (inbound)
+    MACAddress mac;   // sender MAC from envelope (inbound)
     uint16_t  seq = 0;                 // envelope seq (inbound)
 };
 
@@ -105,7 +137,7 @@ public:
         std::vector<uint8_t> frame;   // header + encrypted payload
         TCPMsgRemoteInfo     to;      // ip/host/port (host may still need DNS)
         bool                 needResolve=false;
-        uint8_t              expectedDstMac[6] = {0,0,0,0,0,0};
+        MACAddress           expectedDstMac;
         uint16_t             seq = 0;
         uint16_t             plainLen = 0;
     };
@@ -131,7 +163,7 @@ public:
     TCPMsgResult sendToHost(const Serializable& m,
                         uint8_t chan,
                         const char* host,
-                        const uint8_t expectedDstMac[6],
+                        const MACAddress& expectedDstMac,
                         uint16_t port = TCPMSG_DEFAULT_PORT)
     {
         return sendTo(m, chan, host, IPAddress(), expectedDstMac, port, /*needResolve=*/true);
@@ -140,7 +172,7 @@ public:
     TCPMsgResult sendToHost(const Serializable& m,
                         uint8_t chan,
                         const String& host,
-                        const uint8_t expectedDstMac[6],
+                        const MACAddress& expectedDstMac,
                         uint16_t port = TCPMSG_DEFAULT_PORT)
     {
         return sendToHost(m, chan, host.c_str(), expectedDstMac, port);
@@ -149,7 +181,7 @@ public:
     TCPMsgResult sendToIP(const Serializable& m,
                           uint8_t chan,
                           const IPAddress& ip,
-                          const uint8_t expectedDstMac[6],
+                          const MACAddress& expectedDstMac,
                           uint16_t port = TCPMSG_DEFAULT_PORT)
     {
         return sendTo(m, chan, /*hostStr=*/nullptr, ip, expectedDstMac, port, /*needResolve=*/false);
@@ -161,7 +193,7 @@ public:
     bool isBusy() const { return sendBusy_; }
     bool lastSendOk() const { return lastSendOk_; }
     uint8_t lastSendFlags() const { return lastSendFlags_; }
-    const uint8_t* lastAckMac() const { return lastAckMac_; }
+    const MACAddress& lastAckMac() const { return lastAckMac_; }
     uint16_t lastSendSeq() const { return lastSendSeq_; }
 
     void loop();   // no-op (kept for symmetry)
@@ -215,14 +247,14 @@ private:
                        uint8_t type, uint8_t chan,
                        const uint8_t* encPayload, uint16_t encLen);
     void sendAckInline(AsyncClient* client, uint8_t chan, uint16_t seq,
-                       uint8_t ackCode, uint8_t flags, const uint8_t rxMac[6]);
-    void buildEnvelope(const uint8_t srcMac[6], const uint8_t dstMac[6], uint16_t seq,
+                       uint8_t ackCode, uint8_t flags, const MACAddress& rxMac);
+    void buildEnvelope(const MACAddress& srcMac, const MACAddress& dstMac, uint16_t seq,
                        const std::vector<uint8_t>& appPayload,
                        std::vector<uint8_t>& outPlain);
     bool parseEnvelope(const uint8_t* plain, uint16_t len,
                        const uint8_t*& appPayload, uint16_t& appLen,
-                       uint16_t& seq, uint8_t srcMac[6], uint8_t dstMac[6]) const;
-    void getLocalMac(uint8_t out[6]) const;
+                       uint16_t& seq, MACAddress& srcMac, MACAddress& dstMac) const;
+    const MACAddress& getLocalMac() const;
     void cacheLocalMac();
 
     TCPMsgResult buildPlain(const Serializable& msg,
@@ -293,7 +325,7 @@ private:
                         uint8_t             chan,
                         const char*         hostStr,
                         const IPAddress&    ip,
-                        const uint8_t       expectedDstMac[6],
+                        const MACAddress&   expectedDstMac,
                         uint16_t            port,
                         bool                needResolve);
 
@@ -317,9 +349,9 @@ private:
     uint16_t          nextSeq_ = 1;
     bool              lastSendOk_ = false;
     uint8_t           lastSendFlags_ = 0;
-    uint8_t           lastAckMac_[6] = {0,0,0,0,0,0};
+    MACAddress        lastAckMac_;
     uint16_t          lastSendSeq_ = 0;
-    uint8_t           localMac_[6] = {0,0,0,0,0,0};
+    MACAddress        localMac_;
 
     //for better callbacks
 
