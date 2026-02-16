@@ -1,10 +1,38 @@
 #ifndef PACKET_IO_H
 #define PACKET_IO_H
 
-#include <Arduino.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>   // memcpy
+
+// if we are on Arduino, include Arduino.h for String; otherwise define a minimal String class that behaves like Arduino's String for compatibility
+#ifdef ARDUINO_ARCH_ESP32
+#include <Arduino.h>
+#else
+class String {
+public:
+    String() : str_() {}
+    String(const char* s) : str_(s) {}
+    String(const std::string& s) : str_(s) {}
+    String(std::string&& s) : str_(std::move(s)) {}
+    String(const String& other) : str_(other.str_) {}
+    String(String&& other) : str_(std::move(other.str_)) {}
+
+    String& operator=(const char* s) { str_ = s; return *this; }
+    String& operator=(const std::string& s) { str_ = s; return *this; }
+    String& operator=(std::string&& s) { str_ = std::move(s); return *this; }
+    String& operator=(const String& other) { str_ = other.str_; return *this; }
+    String& operator=(String&& other) { str_ = std::move(other.str_); return *this; }
+
+    const char* c_str() const { return str_.c_str(); }
+    size_t length() const { return str_.length(); }
+    bool isEmpty() const { return str_.empty(); }
+private:
+    std::string str_;
+};
+#endif
+
+
 
 // ------------------------------------------------------------------
 // PacketWriter: cursor-based encoder into caller buffer.
