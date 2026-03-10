@@ -6,7 +6,7 @@
 #include <PacketIO.h>
 
 /**
- * @brief Base for all small binary messages (<256 B encrypted).
+ * @brief Base for binary messages carried by TCPMessenger.
  *
  * Implementors must provide:
  *   - typeId()        : 1-byte application type tag (0–255).
@@ -16,15 +16,18 @@
  *
  * Wire format (as sent by TCPMessenger):
  *
- *   +-------+----------+-------------------------+
- *   | Type  | LenEnc   |   EncryptedPayload[n]   |
- *   +-------+----------+-------------------------+
- *     1 B      1 B           n bytes
+ *   +-------+--------+--------+-------------------------+
+ *   | Type  | ChanId  | LenLo  | LenHi  | EncryptedPayload[n] |
+ *   +-------+--------+--------+--------+-------------------------+
+ *      1 B      1 B      1 B      1 B            n bytes
  *
  * - Type: your typeId().
- * - LenEnc: number of bytes following (encrypted payload length).
- * - EncryptedPayload: if EncryptionHandler provided, this is the encrypted+CRC blob;
- *   otherwise it is the raw plaintext payload.
+ * - ChanId: application-defined channel ID.
+ * - LenLo/LenHi: encrypted payload length as little-endian uint16_t.
+ * - EncryptedPayload: envelope + serialized application payload, optionally protected
+ *   by EncryptionHandler.
+ *
+ * The transport-wide hard cap for the encrypted payload is TCPMSG_MAX_PAYLOAD_ENCRYPTED.
  */
 class Serializable {
 public:

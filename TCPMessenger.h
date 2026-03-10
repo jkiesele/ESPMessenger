@@ -29,7 +29,7 @@
 //default port
 static constexpr uint16_t TCPMSG_DEFAULT_PORT = 12345; // default port for TCP Messenger
 
-static constexpr uint16_t TCPMSG_STATIC_RXBUF = 255u;   // bytes kept on the stack
+static constexpr uint16_t TCPMSG_STATIC_RXBUF = 255u;   // small in-object receive buffer
 static_assert(TCPMSG_STATIC_RXBUF < TCPMSG_MAX_PAYLOAD_ENCRYPTED,
               "static buffer must be smaller than hard cap");
 
@@ -95,6 +95,7 @@ enum TCPMsgResult : uint8_t {
     TCPMSG_ERR_WRONGDSTMAC,
     TCPMSG_ERR_ACK_TIMEOUT,
     TCPMSG_ERR_ACK,
+    TCPMSG_ERR_REMOTE_QUEUE_FULL,
 };
 
 
@@ -146,10 +147,10 @@ public:
     explicit TCPMessenger(EncryptionHandler* enc = nullptr);
     ~TCPMessenger();
 
-    void begin(){
+    bool begin(){
         cacheLocalMac();
         mdnsSniffer_.begin();
-        beginServer(TCPMSG_DEFAULT_PORT);
+        return beginServer(TCPMSG_DEFAULT_PORT);
     }
 
     TCPMessenger(const TCPMessenger&)            = delete;
@@ -189,6 +190,11 @@ public:
     }
 
 
+    // Callback execution context:
+    // - onReceive(): invoked from the dedicated RX worker FreeRTOS task, not from loop().
+    // - onSendDone(): may be invoked from AsyncTCP callback context or from the send worker.
+    // Callbacks must therefore be thread-safe, non-blocking, and must not assume Arduino loop() context.
+    // These callbacks are intended to be set once during initialization, before traffic starts.
     void onReceive (TCPMsgReceiveCB cb) { recvCB_  = cb; }
     void onSendDone(TCPMsgSendDoneCB cb) { sendDoneCB_ = cb; }
     bool isBusy() const;
@@ -276,6 +282,7 @@ private:
         uint16_t  encLen;
         uint16_t  plainLen;
         uint16_t  seq;
+        MACAddress expectedDstMac;
         std::vector<uint8_t> frame;
         uint8_t   headerPos;
         uint8_t   rxType;
@@ -364,7 +371,6 @@ private:
         uint8_t  chan;
         uint16_t len;     // encrypted or plain bytes in data
         uint8_t* data;    // pvPortMalloc'd buffer of length 'len' (or nullptr if len==0)
-        bool     isEncrypted; // true if 'data' is encrypted and needs decrypt in worker
     };
     
     static constexpr UBaseType_t TCPMSG_RX_QUEUE_DEPTH = 16;  // tune
@@ -373,6 +379,19 @@ private:
     
     static void     _rxWorkerThunk(void*);
     void            rxWorkerLoop();
+
+    struct RecentRxEntry {
+        MACAddress srcMac;
+        uint16_t seq = 0;
+        uint32_t stamp = 0;
+        bool     valid = false;
+    };
+
+    static constexpr size_t TCPMSG_RECENT_RX_CACHE_SIZE = 16;
+    RecentRxEntry recentRx_[TCPMSG_RECENT_RX_CACHE_SIZE]{};
+
+    bool isRecentDuplicate(const MACAddress& srcMac, uint16_t seq) const;
+    void rememberRecentRx(const MACAddress& srcMac, uint16_t seq);
 
     MDNSSniffer mdnsSniffer_;
 };

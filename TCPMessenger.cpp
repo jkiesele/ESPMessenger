@@ -30,11 +30,18 @@ TCPMessenger::TCPMessenger(EncryptionHandler* enc)
         TCPMSG_LOG("TCPMessenger: singleton already exists; additional instance unsupported.");
         return;
     }
-    _tcpMessengerSingleton = this;
 
     sendMtx_ = xSemaphoreCreateMutex();
     if (!sendMtx_) {
         TCPMSG_LOG("TCPMessenger: send mutex create failed");
+        return;
+    }
+
+    rxQueue_ = xQueueCreate(TCPMSG_RX_QUEUE_DEPTH, sizeof(RecvItem*));
+    if (!rxQueue_) {
+        TCPMSG_LOG("TCPMessenger: RX queue create failed");
+        vSemaphoreDelete(sendMtx_);
+        sendMtx_ = nullptr;
         return;
     }
 
@@ -48,15 +55,10 @@ TCPMessenger::TCPMessenger(EncryptionHandler* enc)
             1);
     if (ok != pdPASS || !sendWorker_) {
         TCPMSG_LOG("TCPMessenger: send worker create failed");
+        vQueueDelete(rxQueue_);
+        rxQueue_ = nullptr;
         vSemaphoreDelete(sendMtx_);
         sendMtx_ = nullptr;
-        return;
-    }
-    taskRunning_ = true;
-
-    rxQueue_ = xQueueCreate(TCPMSG_RX_QUEUE_DEPTH, sizeof(RecvItem*));
-    if (!rxQueue_) {
-        TCPMSG_LOG("TCPMessenger: RX queue create failed");
         return;
     }
 
@@ -70,12 +72,20 @@ TCPMessenger::TCPMessenger(EncryptionHandler* enc)
             tskNO_AFFINITY);
     if (ok != pdPASS || !rxWorker_) {
         TCPMSG_LOG("TCPMessenger: RX worker create failed");
+        taskRunning_ = false;
+        xTaskNotifyGive(sendWorker_);
+        vTaskDelay(1);
+        sendWorker_ = nullptr;
         vQueueDelete(rxQueue_);
         rxQueue_ = nullptr;
+        vSemaphoreDelete(sendMtx_);
+        sendMtx_ = nullptr;
         return;
     }
-}
 
+    taskRunning_ = true;
+    _tcpMessengerSingleton = this;
+}
 
 TCPMessenger::~TCPMessenger() {
     endServer();
@@ -433,6 +443,12 @@ void TCPMessenger::dispatchFrame(ClientCtx* ctx,
         return;
     }
 
+    if (isRecentDuplicate(srcMac, seq)) {
+        rememberRecentRx(srcMac, seq);
+    sendAckInline(ctx->client, chanId, seq, TCPMSG_ACK_CODE_OK, 0, myMac);
+        return;
+    }
+
     // Allocate item
     RecvItem* it = new RecvItem();
     if (!it) {
@@ -446,7 +462,6 @@ void TCPMessenger::dispatchFrame(ClientCtx* ctx,
     it->type        = type;
     it->chan        = chanId;
     it->len         = appLen;
-    it->isEncrypted = false;
     it->data        = nullptr;
 
     if (appLen) {
@@ -515,6 +530,34 @@ void TCPMessenger::cacheLocalMac() {
     uint8_t tmp[6] = {0,0,0,0,0,0};
     WiFi.macAddress(tmp);
     localMac_.setBytes(tmp);
+}
+
+bool TCPMessenger::isRecentDuplicate(const MACAddress& srcMac, uint16_t seq) const {
+    for (size_t i = 0; i < TCPMSG_RECENT_RX_CACHE_SIZE; ++i) {
+        const RecentRxEntry& e = recentRx_[i];
+        if (e.valid && e.seq == seq && e.srcMac == srcMac) return true;
+    }
+    return false;
+}
+
+void TCPMessenger::rememberRecentRx(const MACAddress& srcMac, uint16_t seq) {
+    size_t best = 0;
+    uint32_t oldest = UINT32_MAX;
+    for (size_t i = 0; i < TCPMSG_RECENT_RX_CACHE_SIZE; ++i) {
+        if (!recentRx_[i].valid) {
+            best = i;
+            oldest = 0;
+            break;
+        }
+        if (recentRx_[i].stamp < oldest) {
+            oldest = recentRx_[i].stamp;
+            best = i;
+        }
+    }
+    recentRx_[best].srcMac = srcMac;
+    recentRx_[best].seq = seq;
+    recentRx_[best].stamp = millis();
+    recentRx_[best].valid = true;
 }
 
 void TCPMessenger::sendAckInline(AsyncClient* client, uint8_t chan, uint16_t seq,
@@ -621,6 +664,7 @@ TCPMsgResult TCPMessenger::sendTo(const Serializable& msg,
     if (!sendMtx_ || !sendWorker_) return TCPMSG_ERR_TRANSPORT;
     if (expectedDstMac.isZero()) return TCPMSG_ERR_WRONGDSTMAC;
 
+    if (localMac_.isZero()) cacheLocalMac();
     const MACAddress& srcMac = getLocalMac();
     if (srcMac.isZero()) return TCPMSG_ERR_NOT_CONNECTED;
 
@@ -715,6 +759,7 @@ void TCPMessenger::sendWorkerLoop()
         }
 
         /* ---- hand off to async TCP -------------------------------- */
+        job.to.mac = job.expectedDstMac;
         auto rc = sendFrame(job.to,
                             job.frame[0],           // type
                             job.frame[1],           // chan
@@ -761,6 +806,7 @@ TCPMsgResult TCPMessenger::sendFrame(const TCPMsgRemoteInfo& to,
     ctx->chan   = chan; ctx->encLen = encLen; ctx->self = this;
     ctx->plainLen = plainLen;
     ctx->seq = seq;
+    ctx->expectedDstMac = to.mac;
 
     ctx->frame.resize(TCPMSG_FRAME_HEADER_LEN + encLen);
     ctx->frame[0] = type;
@@ -934,11 +980,15 @@ void TCPMessenger::onOutboundData(OutboundCtx* ctx, AsyncClient* c, const uint8_
 
         TCPMsgResult ackRc = TCPMSG_ERR_ACK;
         if (ackCode == TCPMSG_ACK_CODE_OK) {
-            ackRc = TCPMSG_OK;
+            if (ackMac == ctx->expectedDstMac) {
+                ackRc = TCPMSG_OK;
+            } else {
+                ackRc = TCPMSG_ERR_WRONGDSTMAC;
+            }
         } else if ((ackFlags & TCPMSG_ACK_FLAG_WRONG_DST) != 0) {
             ackRc = TCPMSG_ERR_WRONGDSTMAC;
         } else if ((ackFlags & TCPMSG_ACK_FLAG_QUEUE_FULL) != 0) {
-            ackRc = TCPMSG_ERR_BUSY;
+            ackRc = TCPMSG_ERR_REMOTE_QUEUE_FULL;
         }
 
         setLastAckState(ackRc == TCPMSG_OK, ackFlags, ackMac);
@@ -1046,33 +1096,11 @@ void TCPMessenger::rxWorkerLoop() {
         RecvItem* it = nullptr;
         if (xQueueReceive(rxQueue_, &it, portMAX_DELAY) != pdTRUE) continue;
         if (it == nullptr) break;                 // graceful stop
-        
-        const uint8_t* cbPtr = nullptr;
-        uint16_t       cbLen = 0;
-        std::vector<uint8_t> decrypted; // local, freed on scope exit
 
-        if (it->isEncrypted) {
-            if (it->len) {
-                std::vector<uint8_t> encVec(it->data, it->data + it->len);
-                if (enc_ && enc_->decrypt(encVec, decrypted)) {
-                    cbPtr = decrypted.data();
-                    cbLen = static_cast<uint16_t>(decrypted.size());
-                } else {
-                    // decode error -> deliver empty payload per current behavior
-                    cbPtr = nullptr;
-                    cbLen = 0;
-                }
-            } else {
-                cbPtr = nullptr; cbLen = 0;
-            }
-        } else {
-            cbPtr = it->data;
-            cbLen = it->len;
-        }
+        const uint8_t* cbPtr = it->data;
+        uint16_t       cbLen = it->len;
 
-        // Invoke user callback in app context
         if (recvCB_) {
-            // Clamp to cap (defensive)
             if (cbLen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) cbLen = TCPMSG_MAX_PAYLOAD_ENCRYPTED;
             recvCB_(it->from, it->type, it->chan, cbPtr, cbLen);
         }
