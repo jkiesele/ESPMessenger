@@ -45,6 +45,7 @@ static constexpr uint8_t TCPMSG_ACK_CODE_ERR = 1;
 static constexpr uint8_t TCPMSG_ACK_FLAG_WRONG_DST     = 0x01;
 static constexpr uint8_t TCPMSG_ACK_FLAG_BAD_FORMAT    = 0x02;
 static constexpr uint8_t TCPMSG_ACK_FLAG_INTERNAL_ERROR= 0x04;
+static constexpr uint8_t TCPMSG_ACK_FLAG_QUEUE_FULL   = 0x08;
 
 
 // ------------------------------------------------------------------
@@ -190,11 +191,11 @@ public:
 
     void onReceive (TCPMsgReceiveCB cb) { recvCB_  = cb; }
     void onSendDone(TCPMsgSendDoneCB cb) { sendDoneCB_ = cb; }
-    bool isBusy() const { return sendBusy_; }
-    bool lastSendOk() const { return lastSendOk_; }
-    uint8_t lastSendFlags() const { return lastSendFlags_; }
-    const MACAddress& lastAckMac() const { return lastAckMac_; }
-    uint16_t lastSendSeq() const { return lastSendSeq_; }
+    bool isBusy() const;
+    bool lastSendOk() const;
+    uint8_t lastSendFlags() const;
+    MACAddress lastAckMac() const;
+    uint16_t lastSendSeq() const;
 
     void loop();   // no-op (kept for symmetry)
 
@@ -311,6 +312,7 @@ private:
 
     void notifySendDone(TCPMsgResult rc, const TCPMsgRemoteInfo& to,
                         uint8_t type, uint8_t chan, uint16_t plainLen);
+    void setLastAckState(bool ok, uint8_t flags, const MACAddress& ackMac);
 
 private:
 
@@ -341,11 +343,11 @@ private:
     TCPMsgReceiveCB  recvCB_;
     TCPMsgSendDoneCB sendDoneCB_;
 
-    SemaphoreHandle_t sendMtx_;
-    TaskHandle_t      sendWorker_;
-    bool              sendBusy_;
+    mutable SemaphoreHandle_t sendMtx_ = nullptr;
+    TaskHandle_t      sendWorker_ = nullptr;
+    bool              sendBusy_ = false;
     PendingSend       pending_;
-    bool              taskRunning_;
+    bool              taskRunning_ = false;
     uint16_t          nextSeq_ = 1;
     bool              lastSendOk_ = false;
     uint8_t           lastSendFlags_ = 0;

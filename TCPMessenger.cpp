@@ -32,25 +32,47 @@ TCPMessenger::TCPMessenger(EncryptionHandler* enc)
     }
     _tcpMessengerSingleton = this;
 
-    sendMtx_     = xSemaphoreCreateMutex();
-    sendBusy_    = false;
-    
-    xTaskCreatePinnedToCore(
-            _sendWorkerThunk,        // entry
+    sendMtx_ = xSemaphoreCreateMutex();
+    if (!sendMtx_) {
+        TCPMSG_LOG("TCPMessenger: send mutex create failed");
+        return;
+    }
+
+    BaseType_t ok = xTaskCreatePinnedToCore(
+            _sendWorkerThunk,
             "TCPMsgW",
             4096,
             this,
-            1,                       // low prio
+            1,
             &sendWorker_,
-            1);                      // APP CPU
+            1);
+    if (ok != pdPASS || !sendWorker_) {
+        TCPMSG_LOG("TCPMessenger: send worker create failed");
+        vSemaphoreDelete(sendMtx_);
+        sendMtx_ = nullptr;
+        return;
+    }
     taskRunning_ = true;
 
     rxQueue_ = xQueueCreate(TCPMSG_RX_QUEUE_DEPTH, sizeof(RecvItem*));
     if (!rxQueue_) {
         TCPMSG_LOG("TCPMessenger: RX queue create failed");
-    } else {
-        xTaskCreatePinnedToCore(_rxWorkerThunk, "TCPMsgRX",
-                                4096, this, 1, &rxWorker_, tskNO_AFFINITY);
+        return;
+    }
+
+    ok = xTaskCreatePinnedToCore(
+            _rxWorkerThunk,
+            "TCPMsgRX",
+            4096,
+            this,
+            1,
+            &rxWorker_,
+            tskNO_AFFINITY);
+    if (ok != pdPASS || !rxWorker_) {
+        TCPMSG_LOG("TCPMessenger: RX worker create failed");
+        vQueueDelete(rxQueue_);
+        rxQueue_ = nullptr;
+        return;
     }
 }
 
@@ -60,30 +82,36 @@ TCPMessenger::~TCPMessenger() {
     if (_tcpMessengerSingleton == this) {
         _tcpMessengerSingleton = nullptr;
     }
-    // stop RX worker
-    if (rxWorker_) {
+
+    if (rxWorker_ && rxQueue_) {
         RecvItem* poison = nullptr;
-        xQueueSendToBack(rxQueue_, &poison, 0);   // wake + stop
-        vTaskDelay(10);                             // yield to let it exit
-        rxWorker_ = nullptr;                       // (worker self-deletes)
+        xQueueSendToBack(rxQueue_, &poison, 0);
+        vTaskDelay(10);
+        rxWorker_ = nullptr;
     }
     if (rxQueue_) {
-        // drain leftovers defensively
         RecvItem* it = nullptr;
         while (xQueueReceive(rxQueue_, &it, 0) == pdTRUE) {
-            if (it) { if (it->data) vPortFree(it->data); delete it; }
+            if (it) {
+                if (it->data) vPortFree(it->data);
+                delete it;
+            }
         }
         vQueueDelete(rxQueue_);
         rxQueue_ = nullptr;
     }
 
-    taskRunning_ = false;
-    xTaskNotifyGive(sendWorker_);   // wake so it can exit
-    vTaskDelay(1);                  // yield to let it clean up (tiny)
-    vSemaphoreDelete(sendMtx_);
+    if (sendWorker_) {
+        taskRunning_ = false;
+        xTaskNotifyGive(sendWorker_);
+        vTaskDelay(1);
+        sendWorker_ = nullptr;
+    }
 
-    
-
+    if (sendMtx_) {
+        vSemaphoreDelete(sendMtx_);
+        sendMtx_ = nullptr;
+    }
 }
 
 
@@ -112,9 +140,10 @@ bool TCPMessenger::beginServer(uint16_t port) {
 
 
 void TCPMessenger::endServer() {
-    // this is not yet safe against pending/concurrent client events;
-    // but we'll never destroy the object anyway in a practical setting, so for later FIXME
-    // clean up all client contexts
+    // WARNING:
+    // Not concurrency-safe against in-flight AsyncTCP callbacks.
+    // Intended only for shutdown / test scenarios where no further callbacks can arrive.
+    // Clean up all client contexts.
     ClientNode* n = head_;
     while (n) {
         ClientNode* next = n->next;
@@ -321,7 +350,15 @@ void TCPMessenger::parseBytes(ClientCtx* ctx, const uint8_t* data, size_t len)
                     return;
                 } else {
                     ctx->useDyn = (ctx->rxLen > TCPMSG_STATIC_RXBUF);
-                    if (ctx->useDyn) ctx->rxBufDyn.resize(ctx->rxLen);
+                    if (ctx->useDyn) {
+                        try {
+                            ctx->rxBufDyn.resize(ctx->rxLen);
+                        } catch (...) {
+                            ctx->closing = true;
+                            if (ctx->client) ctx->client->close(true);
+                            return;
+                        }
+                    }
                     ctx->rxPos = 0;
                 }
             }
@@ -423,24 +460,21 @@ void TCPMessenger::dispatchFrame(ClientCtx* ctx,
         memcpy(it->data, appPayload, appLen);
     }
 
+    // ACK semantics:
+    // ACK OK means the peer fully received, validated, and admitted the
+    // message into its internal delivery queue. It does NOT mean the
+    // application callback has already run. Once ACK OK is sent, the message
+    // must not be discarded due to queue overflow.
     bool queued = false;
     if (rxQueue_ && xQueueSendToBack(rxQueue_, &it, 0) == pdTRUE) {
         queued = true;
-    } else {
-        RecvItem* old = nullptr;
-        if (rxQueue_ && xQueueReceive(rxQueue_, &old, 0) == pdTRUE) {
-            if (old) { if (old->data) vPortFree(old->data); delete old; }
-            if (xQueueSendToBack(rxQueue_, &it, 0) == pdTRUE) {
-                queued = true;
-            }
-        }
     }
 
     if (!queued) {
         if (it->data) vPortFree(it->data);
         delete it;
         sendAckInline(ctx->client, chanId, seq, TCPMSG_ACK_CODE_ERR,
-                      TCPMSG_ACK_FLAG_INTERNAL_ERROR, myMac);
+                      TCPMSG_ACK_FLAG_QUEUE_FULL, myMac);
         return;
     }
 
@@ -510,6 +544,8 @@ void TCPMessenger::sendAckInline(AsyncClient* client, uint8_t chan, uint16_t seq
     size_t written = client->write(reinterpret_cast<const char*>(frame.data()), frame.size());
     if (written == frame.size()) {
         client->send();
+    } else {
+        client->close(true);
     }
 }
 
@@ -582,7 +618,11 @@ TCPMsgResult TCPMessenger::sendTo(const Serializable& msg,
                                           uint16_t            port,
                                           bool                needResolve)
 {
+    if (!sendMtx_ || !sendWorker_) return TCPMSG_ERR_TRANSPORT;
     if (expectedDstMac.isZero()) return TCPMSG_ERR_WRONGDSTMAC;
+
+    const MACAddress& srcMac = getLocalMac();
+    if (srcMac.isZero()) return TCPMSG_ERR_NOT_CONNECTED;
 
     const uint16_t plainLenEarly = msg.payloadSize();
     const size_t totalPlain = TCPMSG_ENVELOPE_HEADER_LEN + static_cast<size_t>(plainLenEarly);
@@ -595,7 +635,6 @@ TCPMsgResult TCPMessenger::sendTo(const Serializable& msg,
     TCPMsgResult rc = buildPlain(msg, appPlain, type);
     if (rc != TCPMSG_OK) return rc;
 
-    const MACAddress& srcMac = getLocalMac();
     const uint16_t seq = nextSeq_++;
     std::vector<uint8_t> plain;
     buildEnvelope(srcMac, expectedDstMac, seq, appPlain, plain);
@@ -625,6 +664,7 @@ TCPMsgResult TCPMessenger::sendTo(const Serializable& msg,
     lastSendSeq_ = seq;
     lastSendFlags_ = 0;
     lastAckMac_ = MACAddress();
+    lastSendOk_ = false;
 
     if (needResolve) {
         pending_.to.host = hostStr ? String(hostStr) : String();
@@ -651,7 +691,10 @@ void TCPMessenger::sendWorkerLoop()
     for (;;)
     {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   // wait work
-        if (!taskRunning_) vTaskDelete(nullptr); // exit if task not running
+        if (!taskRunning_) {
+            vTaskDelete(nullptr);
+            return;
+        }
 
         PendingSend job;
         {
@@ -805,8 +848,7 @@ void TCPMessenger::onOutboundError(OutboundCtx* ctx, AsyncClient* c, int8_t erro
     if (!ctx) return;
     if (!ctx->completed) {
         const TCPMsgResult rc = (error == -2) ? TCPMSG_ERR_WRITE : TCPMSG_ERR_TRANSPORT;
-        lastSendFlags_ = 0;
-        lastAckMac_ = MACAddress();
+        setLastAckState(false, 0, MACAddress());
         notifySendDone(rc, ctx->to, ctx->type, ctx->chan, ctx->plainLen);
         ctx->completed = true;
     }
@@ -817,8 +859,7 @@ void TCPMessenger::onOutboundDisconnect(OutboundCtx* ctx, AsyncClient* c) {
     (void)c;
     if (ctx) {
         if (!ctx->completed) {
-            lastSendFlags_ = 0;
-            lastAckMac_ = MACAddress();
+            setLastAckState(false, 0, MACAddress());
             notifySendDone(ctx->requestWritten ? TCPMSG_ERR_ACK_TIMEOUT : TCPMSG_ERR_TRANSPORT,
                            ctx->to, ctx->type, ctx->chan, ctx->plainLen);
             ctx->completed = true;
@@ -845,8 +886,7 @@ void TCPMessenger::onOutboundData(OutboundCtx* ctx, AsyncClient* c, const uint8_
 
             if (ctx->headerPos == TCPMSG_FRAME_HEADER_LEN) {
                 if (ctx->rxLen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) {
-                    lastSendFlags_ = TCPMSG_ACK_FLAG_BAD_FORMAT;
-                    lastAckMac_ = MACAddress();
+                    setLastAckState(false, TCPMSG_ACK_FLAG_BAD_FORMAT, MACAddress());
                     notifySendDone(TCPMSG_ERR_ACK, ctx->to, ctx->type, ctx->chan, ctx->plainLen);
                     ctx->completed = true;
                     c->close(true);
@@ -888,16 +928,20 @@ void TCPMessenger::onOutboundData(OutboundCtx* ctx, AsyncClient* c, const uint8_
         if (ackSeq != ctx->seq) continue;
 
         const uint8_t ackCode = ackPlain[2];
-        lastSendFlags_ = ackPlain[3];
-        lastAckMac_.setBytes(&ackPlain[4]);
+        const uint8_t ackFlags = ackPlain[3];
+        MACAddress ackMac;
+        ackMac.setBytes(&ackPlain[4]);
 
         TCPMsgResult ackRc = TCPMSG_ERR_ACK;
         if (ackCode == TCPMSG_ACK_CODE_OK) {
             ackRc = TCPMSG_OK;
-        } else if ((lastSendFlags_ & TCPMSG_ACK_FLAG_WRONG_DST) != 0) {
+        } else if ((ackFlags & TCPMSG_ACK_FLAG_WRONG_DST) != 0) {
             ackRc = TCPMSG_ERR_WRONGDSTMAC;
+        } else if ((ackFlags & TCPMSG_ACK_FLAG_QUEUE_FULL) != 0) {
+            ackRc = TCPMSG_ERR_BUSY;
         }
 
+        setLastAckState(ackRc == TCPMSG_OK, ackFlags, ackMac);
         notifySendDone(ackRc, ctx->to, ctx->type, ctx->chan, ctx->plainLen);
         ctx->completed = true;
         c->close(true);
@@ -907,8 +951,7 @@ void TCPMessenger::onOutboundData(OutboundCtx* ctx, AsyncClient* c, const uint8_
 
 void TCPMessenger::onOutboundTimeout(OutboundCtx* ctx, AsyncClient* c, uint32_t /*time*/) {
     if (!ctx || ctx->completed) return;
-    lastSendFlags_ = 0;
-    lastAckMac_ = MACAddress();
+    setLastAckState(false, 0, MACAddress());
     notifySendDone(TCPMSG_ERR_ACK_TIMEOUT, ctx->to, ctx->type, ctx->chan, ctx->plainLen);
     ctx->completed = true;
     if (c) c->close(true);
@@ -921,6 +964,56 @@ void TCPMessenger::onOutboundPoll(OutboundCtx* ctx, AsyncClient* c) {
     }
 }
 
+bool TCPMessenger::isBusy() const {
+    if (!sendMtx_) return false;
+    xSemaphoreTake(sendMtx_, portMAX_DELAY);
+    const bool v = sendBusy_;
+    xSemaphoreGive(sendMtx_);
+    return v;
+}
+
+bool TCPMessenger::lastSendOk() const {
+    if (!sendMtx_) return false;
+    xSemaphoreTake(sendMtx_, portMAX_DELAY);
+    const bool v = lastSendOk_;
+    xSemaphoreGive(sendMtx_);
+    return v;
+}
+
+uint8_t TCPMessenger::lastSendFlags() const {
+    if (!sendMtx_) return 0;
+    xSemaphoreTake(sendMtx_, portMAX_DELAY);
+    const uint8_t v = lastSendFlags_;
+    xSemaphoreGive(sendMtx_);
+    return v;
+}
+
+MACAddress TCPMessenger::lastAckMac() const {
+    MACAddress v;
+    if (!sendMtx_) return v;
+    xSemaphoreTake(sendMtx_, portMAX_DELAY);
+    v = lastAckMac_;
+    xSemaphoreGive(sendMtx_);
+    return v;
+}
+
+uint16_t TCPMessenger::lastSendSeq() const {
+    if (!sendMtx_) return 0;
+    xSemaphoreTake(sendMtx_, portMAX_DELAY);
+    const uint16_t v = lastSendSeq_;
+    xSemaphoreGive(sendMtx_);
+    return v;
+}
+
+void TCPMessenger::setLastAckState(bool ok, uint8_t flags, const MACAddress& ackMac) {
+    if (!sendMtx_) return;
+    xSemaphoreTake(sendMtx_, portMAX_DELAY);
+    lastSendOk_ = ok;
+    lastSendFlags_ = flags;
+    lastAckMac_ = ackMac;
+    xSemaphoreGive(sendMtx_);
+}
+
 
 // ------------------------------------------------------------------
 // Notify app about send completion
@@ -930,7 +1023,6 @@ void TCPMessenger::notifySendDone(TCPMsgResult rc, const TCPMsgRemoteInfo& to,
                                   uint8_t type, uint8_t chanId,
                                   uint16_t plainLen)
 {
-    lastSendOk_ = (rc == TCPMSG_OK);
     if (!sendDoneCB_) return;
     sendDoneCB_(rc, to, type, chanId, plainLen);
 }
@@ -982,14 +1074,6 @@ void TCPMessenger::rxWorkerLoop() {
         if (recvCB_) {
             // Clamp to cap (defensive)
             if (cbLen > TCPMSG_MAX_PAYLOAD_ENCRYPTED) cbLen = TCPMSG_MAX_PAYLOAD_ENCRYPTED;
-            if (it->from.host.isEmpty()) {
-                String host;
-                if (mdnsSniffer_.resolve(it->from.ip, host))
-                    it->from.host = host;               // success
-                //else
-                    //gLogger->println("TCPMessenger: RX host resolve failed for " +
-                    //                 it->from.ip.toString());
-            }
             recvCB_(it->from, it->type, it->chan, cbPtr, cbLen);
         }
 
