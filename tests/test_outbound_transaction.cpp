@@ -228,13 +228,13 @@ bool testAckInvalidFrame() {
 bool testCloseEarly() {
     return runCase("close_early",
                    ServerMode::CloseEarly,
-                   OutboundTransaction::Result::AckTimeout);
+                   OutboundTransaction::Result::ReadFailed);
 }
 
 bool testNoReply() {
     return runCase("no_reply",
                    ServerMode::NoReply,
-                   OutboundTransaction::Result::AckTimeout);
+                   OutboundTransaction::Result::ReadFailed);
 }
 
 using TestFn = bool(*)();

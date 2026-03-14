@@ -28,7 +28,7 @@ OutboundTransaction::Result OutboundTransaction::run(const IPAddress& ip,
         uint8_t byte = 0;
         if (!SocketUtils::readExact(fd, &byte, 1, timeoutMs)) {
             SocketUtils::closeSocket(fd);
-            return Result::AckTimeout;
+            return Result::ReadFailed;
         }
         acc.feed(byte);
     }

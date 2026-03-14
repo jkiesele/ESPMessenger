@@ -23,6 +23,7 @@ bool TCPTransport::begin(uint16_t listenPort, const MACAddress& localMac) {
         rxQueue_.clear();
         duplicateCache_.clear();
         sendBusy_ = false;
+        nextSeq_ = 0;
         running_ = true;
     }
 
@@ -50,6 +51,8 @@ void TCPTransport::end() {
 
     PlatformLockGuard lock(mutex_);
     sendBusy_ = false;
+    rxQueue_.clear();
+    duplicateCache_.clear();
 }
 
 TCPTransport::Result TCPTransport::sendToIP(const uint8_t* payload,
@@ -67,6 +70,7 @@ TCPTransport::Result TCPTransport::sendToIP(const uint8_t* payload,
     }
 
     uint16_t seq = 0;
+    MACAddress localMac;
 
     {
         PlatformLockGuard lock(mutex_);
@@ -80,6 +84,7 @@ TCPTransport::Result TCPTransport::sendToIP(const uint8_t* payload,
         }
 
         sendBusy_ = true;
+        localMac = localMac_;
         seq = nextSeq_++;
     }
 
@@ -87,7 +92,7 @@ TCPTransport::Result TCPTransport::sendToIP(const uint8_t* payload,
     Result result = Result::TransportError;
 
     if (!TransportCodec::buildDataFrame(frame,
-                                        localMac_,
+                                        localMac,
                                         expectedDstMac,
                                         seq,
                                         payload,
@@ -185,7 +190,7 @@ void TCPTransport::handleAcceptedConnection(SocketServer::Connection&& conn) {
         }
     }
 
-    InboundConnection::sendAck(conn, data.seq, ackCode, kAcceptTimeoutMs, 0);
+    (void)InboundConnection::sendAck(conn, data.seq, ackCode, kAcceptTimeoutMs, 0);
 }
 
 bool TCPTransport::isDuplicateLocked(const MACAddress& srcMac, uint16_t seq) const {
