@@ -53,7 +53,9 @@ void TCPMessenger::end() {
     }
 
     transport_.end();
-    sendThread_.waitUntilStopped(5000);
+    if (!sendThread_.waitUntilStopped(5000)) {
+        abort();
+    }
 
     PlatformLockGuard lock(mutex_);
     encryptionHandler_ = nullptr;
@@ -93,11 +95,10 @@ TCPMessenger::Result TCPMessenger::sendToIP(const Serializable& obj,
     pendingSend_.ip = ip;
     pendingSend_.port = port;
     pendingSend_.expectedDstMac = expectedDstMac;
-    pendingSend_.type = obj.typeId();
-    pendingSend_.chanId = chanId;
     pendingSend_.transportPayload = std::move(transportPayload);
     pendingSend_.options = options;
 
+    sendResultReady_ = false;
     sendPending_ = true;
     return Result::Ok;
 }
@@ -180,6 +181,14 @@ void TCPMessenger::sendLoop() {
         bool success = false;
 
         for (uint8_t attempt = 0; attempt < maxAttempts; ++attempt) {
+            {
+                PlatformLockGuard lock(mutex_);
+                if (!running_) {
+                    finalResult.rc = Result::NotRunning;
+                    break;
+                }
+            }
+
             const TCPTransport::Result txRc =
                 transport_.sendToIP(job.transportPayload.data(),
                                     static_cast<uint16_t>(job.transportPayload.size()),
@@ -206,6 +215,13 @@ void TCPMessenger::sendLoop() {
             }
 
             if (job.options.retryDelayMs > 0) {
+                {
+                    PlatformLockGuard lock(mutex_);
+                    if (!running_) {
+                        finalResult.rc = Result::NotRunning;
+                        break;
+                    }
+                }
                 PlatformThread::sleepMs(job.options.retryDelayMs);
             }
         }

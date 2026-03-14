@@ -91,9 +91,6 @@ private:
         uint16_t port = 0;
         MACAddress expectedDstMac;
 
-        uint8_t type = 0;
-        uint8_t chanId = 0;
-
         std::vector<uint8_t> transportPayload;
         SendOptions options;
     };
@@ -112,7 +109,6 @@ private:
     static Result mapTransportResult(TCPTransport::Result rc, bool retriesExhausted);
 
 private:
-    static constexpr uint16_t kMessengerHeaderSize = 4;
     static constexpr uint32_t kTxPollSleepMs = 10;
 
     mutable PlatformMutex mutex_;
