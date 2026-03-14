@@ -57,6 +57,12 @@ build_pthread test_outbound_transaction \
   SocketUtils.cpp SocketServer.cpp FrameAccumulator.cpp TransportCodec.cpp OutboundTransaction.cpp \
   tests/test_outbound_transaction.cpp
 
+build_pthread test_restart_and_lifecycle \
+  SocketUtils.cpp SocketServer.cpp FrameAccumulator.cpp TransportCodec.cpp InboundConnection.cpp \
+  OutboundTransaction.cpp PlatformThreads.cpp PlatformMutex.cpp TCPTransport.cpp \
+  MessengerCodec.cpp TCPMessenger.cpp EncryptionHandler.cpp \
+  tests/test_restart_and_lifecycle.cpp
+
 build_pthread test_platform_mutex \
   PlatformMutex.cpp \
   tests/test_platform_mutex.cpp
@@ -94,6 +100,7 @@ build test_transport_codec \
 run test_frame_accumulator
 run test_messenger_codec
 run test_transport_codec
+run test_restart_and_lifecycle
 run test_platform_mutex
 run test_platform_threads
 run test_outbound_transaction
