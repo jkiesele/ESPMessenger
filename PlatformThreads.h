@@ -26,6 +26,7 @@ public:
 
     struct State;
 private:
+    void releaseFinishedState_();
     State* state_ = nullptr;
 };
 

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <new>
+#include <cstdlib>
 
 namespace tcpmsg {
 
@@ -29,21 +30,21 @@ void threadMain(TrampolineCtx* ctx) {
 }
 
 PlatformThread::~PlatformThread() {
-    if (state_) {
-        waitUntilStopped(5000);
-        if (state_->thread.joinable()) {
-            state_->thread.join();
-        }
-        delete state_;
-        state_ = nullptr;
+    if (state_ && state_->running.load()) {
+        std::fprintf(stderr, "tcpmsg: destroying PlatformThread while still running\n");
+        std::abort();
     }
+    releaseFinishedState_();
 }
 
 bool PlatformThread::start(Entry entry,
                            void* context,
                            const char*,
                            uint32_t) {
-    if (!entry || state_) return false;
+    if (!entry) return false;
+
+    releaseFinishedState_();
+    if (state_) return false;
 
     state_ = new (std::nothrow) State();
     if (!state_) return false;
@@ -97,19 +98,35 @@ void PlatformThread::sleepMs(uint32_t ms) {
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
+void PlatformThread::releaseFinishedState_() {
+    if (!state_) {
+        return;
+    }
+    if (state_->running.load()) {
+        return;
+    }
+    if (state_->thread.joinable()) {
+        state_->thread.join();
+    }
+    delete state_;
+    state_ = nullptr;
+}
+
 } // namespace tcpmsg
 
 #else
 
+#include <atomic>
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <cstdlib>
 
 namespace tcpmsg {
 
 struct PlatformThread::State {
     TaskHandle_t handle = nullptr;
-    volatile bool running = false;
+    std::atomic<bool> running{false};
     Entry entry = nullptr;
     void* context = nullptr;
 };
@@ -118,31 +135,34 @@ namespace {
 void taskMain(void* arg) {
     auto* state = static_cast<PlatformThread::State*>(arg);
     state->entry(state->context);
-    state->running = false;
+    state->running.store(false);
     vTaskDelete(nullptr);
 }
 }
 
 PlatformThread::~PlatformThread() {
-    if (state_) {
-        waitUntilStopped(5000);
-        delete state_;
-        state_ = nullptr;
+    if (state_ && state_->running.load()) {
+        abort();
     }
+    releaseFinishedState_();
 }
 
 bool PlatformThread::start(Entry entry,
                            void* context,
                            const char* name,
                            uint32_t stackSize) {
-    if (!entry || state_) return false;
+
+    if (!entry) return false;
+
+    releaseFinishedState_();
+    if (state_) return false;
 
     state_ = new State();
     if (!state_) return false;
 
     state_->entry = entry;
     state_->context = context;
-    state_->running = true;
+    state_->running.store(true);
 
     BaseType_t rc = xTaskCreate(
         taskMain,
@@ -154,7 +174,7 @@ bool PlatformThread::start(Entry entry,
     );
 
     if (rc != pdPASS) {
-        state_->running = false;
+        state_->running.store(false);
         delete state_;
         state_ = nullptr;
         return false;
@@ -164,14 +184,14 @@ bool PlatformThread::start(Entry entry,
 }
 
 bool PlatformThread::isRunning() const {
-    return state_ && state_->running;
+    return state_ && state_->running.load();
 }
 
 bool PlatformThread::waitUntilStopped(uint32_t timeoutMs) {
     if (!state_) return true;
 
     const uint32_t start = millis();
-    while (state_->running) {
+    while (state_->running.load()) {
         if ((millis() - start) >= timeoutMs) {
             return false;
         }
@@ -182,6 +202,17 @@ bool PlatformThread::waitUntilStopped(uint32_t timeoutMs) {
 
 void PlatformThread::sleepMs(uint32_t ms) {
     vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
+void PlatformThread::releaseFinishedState_() {
+    if (!state_) {
+        return;
+    }
+    if (state_->running.load()) {
+        return;
+    }
+    delete state_;
+    state_ = nullptr;
 }
 
 } // namespace tcpmsg
