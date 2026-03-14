@@ -5,6 +5,7 @@
 #include <mutex>
 #include <new>
 #include <cstdio>
+#include <cstdlib>
 
 namespace tcpmsg {
 
@@ -26,15 +27,19 @@ PlatformMutex::~PlatformMutex() {
 }
 
 void PlatformMutex::lock() {
-    if (state_) {
-        state_->mutex.lock();
+    if (!state_) {
+        std::fprintf(stderr, "tcpmsg: PlatformMutex::lock on invalid mutex\n");
+        std::abort();
     }
+    state_->mutex.lock();
 }
 
 void PlatformMutex::unlock() {
-    if (state_) {
-        state_->mutex.unlock();
+    if (!state_) {
+        std::fprintf(stderr, "tcpmsg: PlatformMutex::unlock on invalid mutex\n");
+        std::abort();
     }
+    state_->mutex.unlock();
 }
 
 } // namespace tcpmsg
@@ -78,15 +83,17 @@ PlatformMutex::~PlatformMutex() {
 }
 
 void PlatformMutex::lock() {
-    if (state_ && state_->handle) {
-        xSemaphoreTake(state_->handle, portMAX_DELAY);
+    if (!state_ || !state_->handle) {
+        abort();
     }
+    xSemaphoreTake(state_->handle, portMAX_DELAY);
 }
 
 void PlatformMutex::unlock() {
-    if (state_ && state_->handle) {
-        xSemaphoreGive(state_->handle);
+    if (!state_ || !state_->handle) {
+        abort();
     }
+    xSemaphoreGive(state_->handle);
 }
 
 } // namespace tcpmsg
