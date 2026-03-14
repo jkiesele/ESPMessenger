@@ -5,6 +5,8 @@
 #include "esp_crc.h"
 #endif
 
+namespace tcpmsg {
+
 // ---------------- CRC32 Implementation ----------------
 
 uint32_t CRC32::calculate(const uint8_t* data, size_t length) {
@@ -24,6 +26,7 @@ uint32_t CRC32::calculate(const uint8_t* data, size_t length) {
     return ~crc;
 #endif
 }
+
 
 // ---------------- EncryptionHandler Implementation ----------------
 
@@ -78,3 +81,5 @@ bool EncryptionHandler::decrypt(const std::vector<uint8_t>& encryptedData, std::
     output.clear();
     return false;
 }
+
+} // namespace tcpmsg

@@ -12,6 +12,8 @@
 
 using tcpmsg::TCPMessenger;
 using tcpmsg::MACAddress;
+using tcpmsg::EncryptionHandler;
+using tcpmsg::Serializable;
 
 namespace {
 

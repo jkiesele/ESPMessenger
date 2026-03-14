@@ -14,6 +14,8 @@ using tcpmsg::PlatformThread;
 using tcpmsg::TCPTransport;
 using tcpmsg::TCPMessenger;
 using tcpmsg::MACAddress;
+using tcpmsg::EncryptionHandler;
+using tcpmsg::Serializable;
 
 namespace {
 
@@ -30,7 +32,7 @@ MACAddress makeMac(uint8_t a0, uint8_t a1, uint8_t a2,
     return MACAddress(raw);
 }
 
-class TinyMessage : public Serializable {
+class TinyMessage : public tcpmsg::Serializable {
 public:
     uint8_t v = 0;
 

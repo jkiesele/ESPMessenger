@@ -25,6 +25,8 @@ using tcpmsg::TransportCodec;
 using tcpmsg::MessengerCodec;
 using tcpmsg::FrameAccumulator;
 using tcpmsg::MACAddress;
+using tcpmsg::EncryptionHandler;
+using tcpmsg::Serializable;
 
 namespace {
 
