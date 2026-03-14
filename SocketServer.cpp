@@ -22,6 +22,7 @@ SocketServer::Connection::Connection(Connection&& other) noexcept
       peerIp_(other.peerIp_),
       peerPort_(other.peerPort_) {
     other.fd_ = SocketUtils::kInvalidFd;
+    other.peerIp_ = IPAddress{};
     other.peerPort_ = 0;
 }
 
@@ -32,6 +33,7 @@ SocketServer::Connection& SocketServer::Connection::operator=(Connection&& other
         peerIp_ = other.peerIp_;
         peerPort_ = other.peerPort_;
         other.fd_ = SocketUtils::kInvalidFd;
+        other.peerIp_ = IPAddress{};
         other.peerPort_ = 0;
     }
     return *this;

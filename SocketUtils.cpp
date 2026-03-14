@@ -30,9 +30,9 @@ bool SocketUtils::waitUntilWritable(int fd, uint32_t timeoutMs) {
     FD_ZERO(&wfds);
     FD_SET(fd, &wfds);
 
-    const timeval tv = makeTimeval(timeoutMs);
+    timeval tv = makeTimeval(timeoutMs);
 
-    const int rc = ::select(fd + 1, nullptr, &wfds, nullptr, const_cast<timeval*>(&tv));
+    const int rc = ::select(fd + 1, nullptr, &wfds, nullptr, &tv);
     if (rc <= 0) return false;
 
     int soError = 0;
@@ -134,10 +134,9 @@ bool SocketUtils::writeExact(int fd, const uint8_t* src, size_t len, uint32_t ti
 
 void SocketUtils::closeSocket(int& fd) {
     if (fd >= 0) {
-        ::shutdown(fd, SHUT_RDWR);
-        ::close(fd);
-        fd = kInvalidFd;
-    }
+    ::close(fd);
+    fd = kInvalidFd;
+}
 }
 
 } // namespace tcpmsg
