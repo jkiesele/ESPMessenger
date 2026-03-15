@@ -96,6 +96,9 @@ build test_transport_codec \
   FrameAccumulator.cpp TransportCodec.cpp \
   tests/test_transport_codec.cpp
 
+build test_local_identity \
+  tests/test_local_identity.cpp
+
 # Run the simple self-contained tests
 run test_frame_accumulator
 run test_messenger_codec
@@ -108,6 +111,7 @@ run test_inbound_connection
 run test_tcp_transport
 run test_tcp_messenger
 run test_tcp_messenger_failures_0
+run test_local_identity
 
 # Run the socket smoke/integration script if present
 if [[ -x "$TEST_DIR/run_socket_tests.sh" ]]; then
