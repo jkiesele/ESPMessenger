@@ -13,7 +13,7 @@
 #include "TransportCodec.h"
 #include "MessengerCodec.h"
 #include "FrameAccumulator.h"
-#include "Helpers.h"
+#include "MACAddress.h"
 #include "EncryptionHandler.h"
 #include "Serializable.h"
 

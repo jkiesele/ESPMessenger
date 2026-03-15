@@ -11,7 +11,7 @@
 #include "SocketServer.h"
 #include "TransportCodec.h"
 #include "FrameAccumulator.h"
-#include "Helpers.h"
+#include "MACAddress.h"
 
 using tcpmsg::InboundConnection;
 using tcpmsg::SocketServer;

@@ -8,7 +8,7 @@
 
 #include "Config.h"
 #include "FrameAccumulator.h"
-#include "Helpers.h"
+#include "MACAddress.h"
 #include "OutboundTransaction.h"
 #include "SocketServer.h"
 #include "TransportCodec.h"

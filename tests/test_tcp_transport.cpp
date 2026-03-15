@@ -12,7 +12,7 @@
 #include "TransportCodec.h"
 #include "FrameAccumulator.h"
 #include "InboundConnection.h"
-#include "Helpers.h"
+#include "MACAddress.h"
 
 using tcpmsg::TCPTransport;
 using tcpmsg::SocketServer;

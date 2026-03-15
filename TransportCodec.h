@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "Helpers.h"
+#include "MACAddress.h"
 #include "FrameAccumulator.h"
 
 namespace tcpmsg {

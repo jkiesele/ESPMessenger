@@ -7,7 +7,7 @@
 #include "SocketServer.h"
 #include "FrameAccumulator.h"
 #include "TransportCodec.h"
-#include "Helpers.h"
+#include "MACAddress.h"
 
 namespace tcpmsg {
 
