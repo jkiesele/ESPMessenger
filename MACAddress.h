@@ -41,6 +41,20 @@ public:
         return !(*this == o);
     }
 
+    static constexpr size_t kStringSize = 18;
+    void toCString(char out[kStringSize]) const {
+        static const char hex[] = "0123456789ABCDEF";
+        for (int i = 0; i < 6; ++i) {
+            const uint8_t b = bytes_[i];
+            out[i * 3 + 0] = hex[(b >> 4) & 0x0F];
+            out[i * 3 + 1] = hex[b & 0x0F];
+            if (i < 5) {
+                out[i * 3 + 2] = ':';
+            }
+        }
+        out[17] = '\0';
+    }
+
 private:
     uint8_t bytes_[6];
 };

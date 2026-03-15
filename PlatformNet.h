@@ -102,6 +102,7 @@ private:
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 #include <errno.h>
+#include <esp_system.h>
 
 #endif
 
@@ -113,9 +114,12 @@ inline bool platformDefineLocalMACAddress(uint8_t out[6]) {
         return false;
     }
 
+
 #if defined(ARDUINO_ARCH_ESP32)
     uint8_t raw[6] = {0, 0, 0, 0, 0, 0};
-    WiFi.macAddress(raw);
+    if (esp_read_mac(raw, ESP_MAC_WIFI_STA) != ESP_OK) {
+        return false;
+    }
 
     bool allZero = true;
     for (int i = 0; i < 6; ++i) {
