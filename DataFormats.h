@@ -37,6 +37,7 @@ public:
         w.write(emptyLevel_);
         w.write(capacity_);
         w.write(temperature_);
+        // w.write(name_);
     }
 
     bool fromBuffer(const uint8_t* src, uint16_t len) override {
@@ -47,20 +48,30 @@ public:
                r.read(emptyLevel_) &&
                r.read(capacity_) &&
                r.read(temperature_) &&
+               // r.read(name_) &&
                r.atEnd();
     }
 
+    // in percent, e.g. 75.5 for 75.5%
     float level() const { return level_; }
+    // in percent, e.g. 75.5 for 75.5%
     void setLevel(float v) { level_ = v; }
 
+    // in percent, e.g. 75.5 for 75.5%
     float emptyLevel() const { return emptyLevel_; }
+    // in percent, e.g. 75.5 for 75.5%
     void setEmptyLevel(float v) { emptyLevel_ = v; }
 
+    // in liters 
     float capacity() const { return capacity_; }
+    // in liters 
     void setCapacity(float v) { capacity_ = v; }
 
     float temperature() const { return temperature_; }
     void setTemperature(float v) { temperature_ = v; }
+
+    const ByteString& name() const { return name_; }
+    void setName(const char* s) { name_.assign(s); }
 
     float litersFullMin() const {
         return capacity_ * (level_ / 100.0f);
@@ -75,6 +86,7 @@ protected:
     float emptyLevel_;
     float capacity_;
     float temperature_;
+    ByteString name_; //not transmitted
 };
 
 class TextMessage : public Serializable {
